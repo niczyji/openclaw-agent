@@ -1,0 +1,23 @@
+{
+  "id": "my-session",
+  "createdAt": "2026-02-22T09:22:57.705Z",
+  "updatedAt": "2026-02-22T09:23:06.883Z",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Merke dir: Projektname ist OpenClaw-Agent"
+    },
+    {
+      "role": "assistant",
+      "content": "Noted: I've saved the project name as \"OpenClaw-Agent\" for our conversation."
+    },
+    {
+      "role": "user",
+      "content": "Was ist der Projektname?"
+    },
+    {
+      "role": "assistant",
+      "content": "Der Projektname ist OpenClaw-Agent."
+    }
+  ]
+}

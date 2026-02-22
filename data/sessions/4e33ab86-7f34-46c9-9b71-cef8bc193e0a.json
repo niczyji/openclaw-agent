@@ -1,0 +1,15 @@
+{
+  "id": "4e33ab86-7f34-46c9-9b71-cef8bc193e0a",
+  "createdAt": "2026-02-22T09:22:36.145Z",
+  "updatedAt": "2026-02-22T09:22:39.363Z",
+  "messages": [
+    {
+      "role": "user",
+      "content": "ping"
+    },
+    {
+      "role": "assistant",
+      "content": "Pong! How can I assist you today? 😊"
+    }
+  ]
+}
