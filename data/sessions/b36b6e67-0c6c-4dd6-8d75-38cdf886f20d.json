@@ -1,0 +1,15 @@
+{
+  "id": "b36b6e67-0c6c-4dd6-8d75-38cdf886f20d",
+  "createdAt": "2026-02-22T09:54:58.735Z",
+  "updatedAt": "2026-02-22T09:55:02.525Z",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Review meinen Code Stil und nenn Verbesserungen"
+    },
+    {
+      "role": "assistant",
+      "content": "Ich würde gerne deinen Code reviewen! Allerdings hast du **keinen Code** in deiner Nachricht eingefügt.\n\nBitte teile deinen Code, dann gebe ich dir detailliertes Feedback zu:\n\n- **Lesbarkeit** (Naming, Formatierung)\n- **Struktur** (Funktionen, Module)\n- **Best Practices** (Sprachspezifisch)\n- **Potenzielle Bugs**\n- **Performance**\n\nFüge einfach deinen Code hier ein! 🚀"
+    }
+  ]
+}
