@@ -1,3 +1,4 @@
+// tools/registry.ts
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { assertAllowedPath } from "./policy.ts";
@@ -7,7 +8,6 @@ const MAX_READ_BYTES = 200_000; // 200 KB
 const MAX_DIR_ENTRIES = 200;
 
 function redactSecrets(text: string): string {
-  // mask common secret patterns
   const patterns: Array<[RegExp, string]> = [
     [/(API_KEY\s*=\s*)(.+)/gi, "$1***REDACTED***"],
     [/(GROK_API_KEY\s*=\s*)(.+)/gi, "$1***REDACTED***"],
@@ -67,7 +67,10 @@ export async function runTool(call: ToolCall): Promise<ToolResult> {
           path: call.path,
           totalEntries: entries.length,
           returnedEntries: sliced.length,
-          entries: sliced.map((e) => ({ name: e.name, type: e.isDirectory() ? "dir" : "file" })),
+          entries: sliced.map((e) => ({
+            name: e.name,
+            type: e.isDirectory() ? "dir" : "file",
+          })),
         },
       };
     }
@@ -78,7 +81,9 @@ export async function runTool(call: ToolCall): Promise<ToolResult> {
       // write_file restricted to data/outputs/*
       const outRoot = assertAllowedPath("data/outputs");
       if (!full.startsWith(outRoot + path.sep) && full !== outRoot) {
-        throw new Error(`write_file restricted to data/outputs/* (got: ${call.path})`);
+        throw new Error(
+          `write_file restricted to data/outputs/* (got: ${call.path})`,
+        );
       }
 
       await fs.mkdir(path.dirname(full), { recursive: true });
@@ -93,11 +98,93 @@ export async function runTool(call: ToolCall): Promise<ToolResult> {
       }
 
       await fs.writeFile(full, call.content, "utf8");
-      return { ok: true, tool: call.tool, result: { path: call.path, bytes: call.content.length } };
+      return {
+        ok: true,
+        tool: call.tool,
+        result: { path: call.path, bytes: call.content.length },
+      };
     }
 
-    return { ok: false, tool: call.tool as any, error: "Unknown tool" };
+    return { ok: false, tool: call.tool, error: "Unknown tool" };
   } catch (e: any) {
     return { ok: false, tool: call.tool, error: String(e?.message ?? e) };
   }
+}
+
+/**
+ * Bridge: model ToolCall {name, argumentsJson} -> internal ToolCall union -> ToolResult -> string
+ * This is what core/toolloop.ts should call.
+ */
+export async function runToolFromModelCall(input: {
+  name: string;
+  argumentsJson: string;
+}): Promise<string> {
+  let args: unknown;
+  try {
+    args = JSON.parse(input.argumentsJson) as unknown;
+  } catch (e) {
+    return JSON.stringify(
+      {
+        ok: false,
+        tool: input.name,
+        error: "Invalid JSON arguments",
+        details: String(e),
+      },
+      null,
+      2,
+    );
+  }
+
+  // Strict mapping into your ToolCall union (no any)
+  const call = toInternalToolCall(input.name, args);
+  const result = await runTool(call);
+
+  return JSON.stringify(result, null, 2);
+}
+
+function isRecord(x: unknown): x is Record<string, unknown> {
+  return typeof x === "object" && x !== null;
+}
+
+function toInternalToolCall(name: string, args: unknown): ToolCall {
+  if (!isRecord(args)) {
+    throw new Error(`Tool args must be an object for ${name}`);
+  }
+
+  if (name === "read_file") {
+    const pathArg = args.path;
+    if (typeof pathArg !== "string")
+      throw new Error("read_file requires { path: string }");
+    return { tool: "read_file", path: pathArg };
+  }
+
+  if (name === "list_dir") {
+    const pathArg = args.path;
+    if (typeof pathArg !== "string")
+      throw new Error("list_dir requires { path: string }");
+    return { tool: "list_dir", path: pathArg };
+  }
+
+  if (name === "write_file") {
+    const pathArg = args.path;
+    const contentArg = args.content;
+    const overwriteArg = args.overwrite;
+
+    if (typeof pathArg !== "string")
+      throw new Error("write_file requires { path: string, content: string }");
+    if (typeof contentArg !== "string")
+      throw new Error("write_file requires { content: string }");
+    if (overwriteArg !== undefined && typeof overwriteArg !== "boolean") {
+      throw new Error("write_file overwrite must be boolean if provided");
+    }
+
+    return {
+      tool: "write_file",
+      path: pathArg,
+      content: contentArg,
+      overwrite: overwriteArg ?? false,
+    };
+  }
+
+  throw new Error(`Unknown tool name: ${name}`);
 }

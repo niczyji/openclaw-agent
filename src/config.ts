@@ -19,9 +19,8 @@ export const config = {
   grok: {
     apiKey: requireEnv("GROK_API_KEY"),
     model: env("GROK_MODEL") ?? "grok-3-mini",
-    baseURL: env("GROK_BASE_URL") ?? "https://api.x.ai/v1",
+    baseUrl: env("GROK_BASE_URL") ?? "https://api.x.ai/v1", // <- change name
   },
-
   anthropic: {
     apiKey: env("ANTHROPIC_API_KEY") ?? null,
     model: env("ANTHROPIC_MODEL") ?? "claude-3-5-sonnet-latest",

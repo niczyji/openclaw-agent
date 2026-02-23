@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { startTelegramAdapter } from "./adapters/telegram.ts";
+import { startTelegramAdapter } from "./adapters/telegram";
 
 async function main() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
