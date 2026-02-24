@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import type { ChatMessage } from "../core/types.js";
+import type { LlmMessage } from "../core/types";
 
 const SESS_DIR = path.resolve("data/sessions");
 
@@ -9,7 +9,7 @@ export type Session = {
   id: string;
   createdAt: string;
   updatedAt: string;
-  messages: ChatMessage[];
+  messages: LlmMessage[];
 };
 
 function nowISO() {
@@ -44,7 +44,6 @@ export async function getOrCreateSession(id?: string): Promise<Session> {
   if (id) {
     const existing = await loadSession(id);
     if (existing) return existing;
-    // wenn nicht existiert: neue Session mit gewünschter ID
     return {
       id,
       createdAt: nowISO(),
