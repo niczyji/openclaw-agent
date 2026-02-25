@@ -48,6 +48,9 @@ type Args = {
 
   // free text input
   input: string;
+
+  provider?: string;
+  model?: string;
 };
 
 function parseArgs(argv: string[]): Args {
@@ -72,6 +75,9 @@ function parseArgs(argv: string[]): Args {
   let steps: number | undefined;
   let yes = false;
 
+  let provider: string | undefined;
+  let model: string | undefined;
+
   const rest: string[] = [];
 
   for (let i = 0; i < argv.length; i++) {
@@ -94,6 +100,8 @@ function parseArgs(argv: string[]): Args {
     else if (a === "--toolloop") toolloop = true;
     else if (a === "--steps") steps = Number(argv[++i]);
     else if (a === "--yes") yes = true;
+    else if (a === "--provider") provider = argv[++i];
+    else if (a === "--model") model = argv[++i];
     else rest.push(a);
   }
 
@@ -122,6 +130,9 @@ function parseArgs(argv: string[]): Args {
     yes,
 
     input,
+
+    provider,
+    model,
   };
 }
 
@@ -235,8 +246,9 @@ export async function main(argv: string[]) {
       process.exit(1);
     }
 
-    const res = await withTiming({ event: "tool_call", details: call } as any, async () =>
-      runTool(call),
+    const res = await withTiming(
+      { event: "tool_call", details: call } as any,
+      async () => runTool(call),
     );
 
     await logEvent({
@@ -280,7 +292,11 @@ export async function main(argv: string[]) {
   }
 
   // 4) Now create session + purpose + userInput
-  const purpose: Purpose = args.heartbeat ? "heartbeat" : args.dev ? "dev" : "default";
+  const purpose: Purpose = args.heartbeat
+    ? "heartbeat"
+    : args.dev
+      ? "dev"
+      : "default";
   const session = await getOrCreateSession(args.session);
   const userInput = args.heartbeat ? "ping" : args.input;
 
@@ -288,37 +304,58 @@ export async function main(argv: string[]) {
 
   // 5) Toolloop branch
   if (args.toolloop) {
-    const rl = readline.createInterface({ input: processStdin, output: processStdout });
+    const rl = readline.createInterface({
+      input: processStdin,
+      output: processStdout,
+    });
 
     const approve = async (call: any) => {
       console.log("\nTOOL REQUEST:");
       console.log(JSON.stringify(call, null, 2));
 
       // --yes auto-approves only "safe" tools
-      const safeAutoApprove = args.yes && (call.tool === "read_file" || call.tool === "list_dir");
+      const toolName = (call?.name ?? call?.tool) as string | undefined;
+
+      // --yes auto-approves only safe tools
+      const safeAutoApprove =
+        args.yes && (toolName === "read_file" || toolName === "list_dir");
       if (safeAutoApprove) {
         console.log("(auto-approved: safe tool via --yes)");
         return true;
       }
 
-      // write_file (and everything else) always requires manual confirmation
-      if (call.tool === "write_file" && args.yes) {
-        console.log("(NOTE: --yes does NOT auto-approve write_file; manual approval required)");
+      // --dev auto-approves write_file (builder mode)
+      if (args.dev && toolName === "write_file") {
+        console.log("(auto-approved: write_file via --dev)");
+        return true;
       }
 
-      const ans = (await rl.question("Approve this tool call? (y/n) ")).trim().toLowerCase();
+      // write_file (and everything else) always requires manual confirmation
+      if (call.tool === "write_file" && args.yes) {
+        console.log(
+          "(NOTE: --yes does NOT auto-approve write_file; manual approval required)",
+        );
+      }
+
+      const ans = (await rl.question("Approve this tool call? (y/n) "))
+        .trim()
+        .toLowerCase();
       return ans === "y" || ans === "yes";
     };
 
     try {
-      const res = await withTiming({ ...meta, event: "toolloop_run" } as any, async () =>
-        runAgentToolLoop(session, {
-          purpose,
-          input: userInput,
-          system: args.system,
-          maxSteps: args.steps ?? 3,
-          approve,
-        }),
+      const res = await withTiming(
+        { ...meta, event: "toolloop_run" } as any,
+        async () =>
+          runAgentToolLoop(session, {
+            purpose,
+            input: userInput,
+            system: args.system,
+            maxSteps: args.steps ?? 3,
+            approve,
+            provider: args.provider,
+            model: args.model,
+          }),
       );
 
       rl.close();
@@ -345,12 +382,14 @@ export async function main(argv: string[]) {
 
   // 6) Normal agent run
   try {
-    const res = await withTiming({ ...meta, event: "llm_call" } as any, async () =>
-      runAgent(session, {
-        purpose,
-        input: userInput,
-        system: args.system,
-      }),
+    const res = await withTiming(
+      { ...meta, event: "llm_call" } as any,
+      async () =>
+        runAgent(session, {
+          purpose,
+          input: userInput,
+          system: args.system,
+        }),
     );
 
     await saveSession(session);

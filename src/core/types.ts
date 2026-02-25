@@ -167,8 +167,8 @@ export type LlmRequest = Readonly<{
 }>;
 
 export type LlmResponse = Readonly<{
-  provider: ProviderId;
-  model: string;
+  provider?: ProviderName;
+  model?: string;
 
   /**
    * Convenience: the “main” assistant text (may be empty if toolCalls).

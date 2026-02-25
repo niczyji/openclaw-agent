@@ -18,6 +18,10 @@ import {
   type ToolKind,
 } from "./budget";
 
+import type { Session } from "../memory/store.js";
+import type { Purpose } from "./types.js";
+import type { LlmMessage, ToolCall, LlmResponse } from "./types.js";
+
 import { runToolFromModelCall } from "../tools/registry";
 import { classifyTool } from "../tools/policy";
 import { ALL_TOOLS } from "../tools/definitions";
@@ -143,12 +147,13 @@ export async function runToolLoop(
       let toolOut: string;
       try {
         toolOut = await runToolFromModelCall({
+          id: call.id,
           name: call.name,
           argumentsJson: call.argumentsJson,
         });
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        toolOut = JSON.stringify({ ok: false, error: msg }, null, 2);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        toolOut = JSON.stringify({ ok: false, tool: call.name, error: msg });
       }
 
       const toolMsg: ToolMessage = {
@@ -161,4 +166,54 @@ export async function runToolLoop(
       messages = clampHistory([...messages, toolMsg], opts.keepLastN);
     }
   }
+}
+
+// Legacy-friendly wrapper for adapters (CLI/Telegram)
+export async function runAgentToolLoop(
+  session: Session,
+  opts: {
+    purpose: Purpose;
+    input: string;
+    system?: string;
+    maxSteps?: number;
+    keepLastN?: number;
+    provider?: any; // ProviderName if you have it
+    model?: string;
+    approve: (call: ToolCall) => Promise<boolean>;
+  },
+): Promise<LlmResponse> {
+  const keep = opts.keepLastN ?? 200;
+  const history = session.messages.slice(-keep) as unknown as LlmMessage[];
+
+  const messages: LlmMessage[] = [
+    {
+      role: "system",
+      content:
+        opts.system ??
+        "You are a helpful assistant. Keep answers concise unless asked otherwise.",
+    } as LlmMessage,
+    ...history,
+    { role: "user", content: opts.input } as LlmMessage,
+  ];
+
+  const { final } = await runToolLoop({
+    request: {
+      purpose: opts.purpose,
+      provider: opts.provider, // optional, router can resolve if undefined
+      model: opts.model, // optional, router can resolve if undefined
+      messages,
+      // optional safety default:
+      maxOutputTokens: 2048,
+      // tools omitted => toolloop uses ALL_TOOLS fallback
+    } as any,
+    limits: { maxSteps: opts.maxSteps ?? 3 },
+    keepLastN: keep,
+    approve: opts.approve,
+  });
+
+  // Persist the actual turn (minimal; you can refine later)
+  session.messages.push({ role: "user", content: opts.input } as any);
+  session.messages.push({ role: "assistant", content: final.text } as any);
+
+  return final;
 }

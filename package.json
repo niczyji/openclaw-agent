@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "tsx src/main.ts",
     "agent": "tsx src/main.ts",
-    "build": "tsup",
+    "build": "tsc -p tsconfig.json",
+    "devbuild": "tsx src/main.ts --toolloop --dev --steps 10",
     "start": "node dist/main.js",
     "clean": "rm -rf dist",
     "lint": "eslint .",

@@ -6,6 +6,30 @@ yarn-debug.log*
 yarn-error.log*
 lerna-debug.log*
 
+
+cat >> .gitignore <<'EOF'
+
+# --- build artifacts (generated) ---
+*.js
+*.d.ts
+*.map
+
+# keep real configs tracked (unignore)
+!eslint.config.js
+!tsup.config.ts
+!tsconfig.json
+!prettier.config.*
+!vite.config.*
+!vitest.config.*
+!jest.config.*
+
+# local/build dirs
+dist/
+node_modules/
+data/
+logs/
+
+EOF
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
@@ -158,3 +182,8 @@ data/outputs/
 node_modules/
 
 resolver
+dist/
+src/**/*.js
+src/**/*.d.ts
+src/**/*.js.map
+src/**/*.d.ts.map

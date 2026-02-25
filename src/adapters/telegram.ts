@@ -206,10 +206,11 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
             "/help - show help",
             "/id - show chatId/sessionId",
             "/reset - clear your session",
-            "/dev <text> - route to DEV model (Claude)",
+            "/dev <text> - route to DEV model (Claude) + builder mode",
             "",
             "Normal messages use default model (Grok).",
-            "Tool requests will ask for approval with buttons.",
+            "Tool requests may ask for approval with buttons.",
+            "write_file is only possible in /dev and only for admins.",
           ].join("\n"),
         );
         return;
@@ -239,9 +240,16 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
         return;
       }
 
-      // Route
-      const isDev = text.startsWith("/dev ");
-      const userInput = isDev ? text.replace(/^\/dev\s+/, "") : text;
+      // -------- Route (/dev => builder mode) --------
+      const isDev = /^\/dev(\s|$)/i.test(text);
+      const builderMode = isDev;
+
+      const userInput = isDev ? text.replace(/^\/dev\s*/i, "") : text;
+      if (isDev && !userInput.trim()) {
+        await sendLongMessage(bot, chatId, "Usage: /dev <your request>");
+        return;
+      }
+
       const purpose = isDev ? "dev" : "default";
 
       const sessionId = `tg-${chatId}`;
@@ -253,18 +261,36 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
         `🧠 Working… (session ${sessionId}, ${purpose})`,
       );
 
-      // Approval function
+      // Approval function (CLI-like policy)
       const approve = async (call: any): Promise<boolean> => {
-        // Admin-only write_file
-        if (call.tool === "write_file" && !admins.has(chatId)) {
-          await sendLongMessage(
-            bot,
-            chatId,
-            "❌ write_file is restricted to admins.",
-          );
-          return false;
+        const toolName = (call?.name ?? call?.tool ?? "").toString();
+
+        // Always allow safe read tools
+        if (toolName === "read_file" || toolName === "list_dir") return true;
+
+        // write_file: only in /dev AND only for admins
+        if (toolName === "write_file") {
+          if (!builderMode) {
+            await sendLongMessage(
+              bot,
+              chatId,
+              "❌ write_file is only available in /dev mode.",
+            );
+            return false;
+          }
+          if (!admins.has(chatId)) {
+            await sendLongMessage(
+              bot,
+              chatId,
+              "❌ write_file is restricted to admins.",
+            );
+            return false;
+          }
+          // Auto-approve in /dev for admins (no buttons)
+          return true;
         }
 
+        // Everything else: keep your interactive approval UX
         const key = `${chatId}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
 
         const sent = await sendLongMessage(
@@ -284,10 +310,8 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
           },
         );
 
-        // IMPORTANT: sendLongMessage returns the last Telegram message object (must include message_id)
         const messageId = sent?.message_id;
         if (typeof messageId !== "number") {
-          // Fallback: if something went weird, deny safely
           await sendLongMessage(
             bot,
             chatId,
@@ -359,7 +383,7 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
   bot.on("callback_query", async (q) => {
     try {
       if (!q.data || !q.message) return;
-
+      console.log("TG callback_query data:", q.data);
       const chatId = q.message.chat.id;
 
       if (allowed && !allowed.has(chatId)) {
@@ -367,10 +391,23 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
         return;
       }
 
-      const [action, key] = q.data.split(":", 2);
-      if (!key) return;
+      const data = q.data;
+
+      let action: "approve" | "deny" | null = null;
+      let key = "";
+
+      if (data.startsWith("approve:")) {
+        action = "approve";
+        key = data.slice("approve:".length);
+      } else if (data.startsWith("deny:")) {
+        action = "deny";
+        key = data.slice("deny:".length);
+      } else {
+        return;
+      }
 
       const p = pending.get(key);
+
       if (!p) {
         await bot.answerCallbackQuery(q.id, { text: "Expired." });
         return;
