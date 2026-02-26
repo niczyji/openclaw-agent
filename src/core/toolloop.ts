@@ -129,6 +129,12 @@ export async function runToolLoop(
 
       const approved = await opts.approve(call);
 
+      logEvent({
+        level: "info",
+        event: "toolloop_approve_prompt",
+        details: { tool: call.name ?? call.tool, id: call.id },
+      });
+
       if (!approved) {
         const denied: ToolMessage = {
           role: "tool",

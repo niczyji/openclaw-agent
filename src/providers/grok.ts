@@ -1,9 +1,11 @@
 // providers/grok.ts
 import OpenAI from "openai";
+import fs from "node:fs";
+import path from "node:path";
+
 import { config } from "../config.js";
 import type {
   AssistantMessage,
-  LlmMessage,
   LlmRequest,
   LlmResponse,
   ToolCall,
@@ -11,47 +13,75 @@ import type {
 } from "../core/types.js";
 import { makeUsage } from "../core/types.js";
 
-function toOpenAiInput(messages: readonly LlmMessage[]) {
-  // For OpenAI Responses API, input can be "messages-like" objects.
-  // We keep it simple: system/user/assistant/tool all become role+content messages.
-  // If you later want true tool calling in Responses API, you'll map ToolDefinitions too.
-  return messages.map((m) => {
-    if (m.role === "tool") {
-      return {
-        role: "tool" as const,
-        content: m.content,
-        // Some endpoints accept name/tool_call_id; harmless if ignored.
-        name: m.name,
-        tool_call_id: m.toolCallId,
-      };
-    }
-
-    if (m.role === "assistant") {
-      return {
-        role: "assistant" as const,
-        content: m.content,
-      };
-    }
-
-    if (m.role === "system") {
-      return {
-        role: "system" as const,
-        content: m.content,
-      };
-    }
-
-    return {
-      role: "user" as const,
-      content: m.content,
-    };
-  });
+function envFlag(name: string): boolean {
+  return (process.env[name] ?? "").trim() === "1";
 }
 
+// NOTE: This must already exist in your codebase.
+// If it's in a different file, keep your original import.
+
+function toOpenAiInput(messages: LlmRequest["messages"]): string {
+  // Most compatible form for xAI Responses: plain string input.
+  // We serialize conversation into a single prompt.
+  return messages
+    .map((m: any) => {
+      const role = String(m?.role ?? "user");
+      const content =
+        typeof m?.content === "string"
+          ? m.content
+          : Array.isArray(m?.content)
+            ? m.content
+                .map((c: any) => (typeof c?.text === "string" ? c.text : ""))
+                .join("")
+            : String(m?.content ?? "");
+      return `${role.toUpperCase()}: ${content}`;
+    })
+    .join("\n\n");
+}
+
+function getTraceId(req: any): string {
+  const t = String(req?.traceId ?? req?.trace ?? "").trim();
+  return t || `trace-${Date.now().toString(36)}`;
+}
+
+function dump(trace: string, name: string, obj: unknown) {
+  try {
+    const dir = "/tmp/openclaw";
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, `${trace}.${name}.json`),
+      JSON.stringify(obj, null, 2),
+      "utf8",
+    );
+  } catch (e) {
+    // Do not crash the agent for debug failures
+    console.error("dump failed:", e);
+  }
+}
+
+// -------------------------
+// Tools conversion
+// -------------------------
+function toOpenAiTools(tools: readonly ToolDefinition[]) {
+  // xAI (Grok) Responses tools:
+  // { type: "function", name, description, parameters }
+  return tools.map((t) => ({
+    type: "function" as const,
+    name: t.name,
+    description: t.description,
+    parameters: t.parameters,
+  }));
+}
+
+// -------------------------
+// Response extraction
+// -------------------------
 function extractText(res: unknown): string {
-  // OpenAI Responses API (and some compatibles) may provide output_text.
+  // OpenAI Responses API (and compatibles) may provide output_text.
   const r = res as { output_text?: unknown; output?: unknown };
-  if (typeof r.output_text === "string" && r.output_text.length)
+  if (typeof r.output_text === "string" && r.output_text.length) {
     return r.output_text;
+  }
 
   const out = r.output;
   if (Array.isArray(out)) {
@@ -72,36 +102,81 @@ function extractText(res: unknown): string {
 }
 
 function extractToolCalls(res: unknown): ToolCall[] {
-  // Responses API can expose tool calls in different shapes depending on provider.
-  // We'll implement a conservative extractor:
-  // - look for output[].content[] blocks of type "tool_call" / "function_call" variants if present.
+  // Responses API tool calls appear in different shapes across providers.
+  // Handle common patterns:
+  // A) output[] item itself has type function_call/tool_call
+  // B) output[].content[] has blocks with type function_call/tool_call
   const calls: ToolCall[] = [];
-  const r = res as { output?: unknown };
+  const r = res as any;
 
-  if (!Array.isArray(r.output)) return calls;
+  const out = r?.output;
+  if (!Array.isArray(out)) return calls;
 
-  for (const item of r.output) {
-    const content = (item as { content?: unknown })?.content;
+  for (const item of out) {
+    const itemType = item?.type;
+
+    // Pattern A
+    if (itemType === "tool_call" || itemType === "function_call") {
+      const id = String(item?.id ?? item?.call_id ?? "");
+      const name = String(
+        item?.name ??
+          item?.tool_name ??
+          item?.function?.name ??
+          item?.function_name ??
+          "",
+      );
+
+      const argsRaw =
+        item?.arguments ??
+        item?.args ??
+        item?.input ??
+        item?.function?.arguments ??
+        item?.function?.args ??
+        {};
+
+      const argumentsJson =
+        typeof argsRaw === "string" ? argsRaw : JSON.stringify(argsRaw);
+
+      if (name) {
+        calls.push({
+          id: id || `${name}:${calls.length}`,
+          name,
+          argumentsJson,
+        });
+      }
+      continue;
+    }
+
+    // Pattern B
+    const content = item?.content;
     if (!Array.isArray(content)) continue;
 
     for (const c of content) {
-      const type = (c as { type?: unknown })?.type;
-      if (typeof type !== "string") continue;
+      const type = c?.type;
+      if (type !== "tool_call" && type !== "function_call") continue;
 
-      // Some compatibles use "tool_call" or "function_call"
-      if (type === "tool_call" || type === "function_call") {
-        const id = String((c as { id?: unknown })?.id ?? "");
-        const name = String((c as { name?: unknown })?.name ?? "");
-        const args =
-          (c as { arguments?: unknown; args?: unknown })?.arguments ??
-          (c as { arguments?: unknown; args?: unknown })?.args ??
-          {};
-        const argumentsJson =
-          typeof args === "string" ? args : JSON.stringify(args);
+      const id = String(c?.id ?? c?.call_id ?? "");
+      const name = String(
+        c?.name ?? c?.tool_name ?? c?.function?.name ?? c?.function_name ?? "",
+      );
 
-        if (id && name) {
-          calls.push({ id, name, argumentsJson });
-        }
+      const argsRaw =
+        c?.arguments ??
+        c?.args ??
+        c?.input ??
+        c?.function?.arguments ??
+        c?.function?.args ??
+        {};
+
+      const argumentsJson =
+        typeof argsRaw === "string" ? argsRaw : JSON.stringify(argsRaw);
+
+      if (name) {
+        calls.push({
+          id: id || `${name}:${calls.length}`,
+          name,
+          argumentsJson,
+        });
       }
     }
   }
@@ -142,23 +217,15 @@ function normalizeUsage(res: unknown) {
   return makeUsage(0, 0);
 }
 
-function toOpenAiTools(tools: readonly ToolDefinition[]) {
-  // Responses API tools are usually:
-  // { type: "function", function: { name, description, parameters } }
-  return tools.map((t) => ({
-    type: "function" as const,
-    function: {
-      name: t.name,
-      description: t.description,
-      parameters: t.parameters,
-    },
-  }));
-}
-
+// -------------------------
+// Main
+// -------------------------
 export async function grokChat(req: LlmRequest): Promise<LlmResponse> {
   if (!config.grok.apiKey) {
     throw new Error("GROK_API_KEY not set. Set it in .env to enable Grok.");
   }
+
+  const traceId = getTraceId(req as any);
 
   const client = new OpenAI({
     apiKey: config.grok.apiKey,
@@ -168,6 +235,24 @@ export async function grokChat(req: LlmRequest): Promise<LlmResponse> {
   // Hard enforcement
   const maxOutputTokens = Math.max(1, Math.trunc(req.maxOutputTokens));
 
+  if (req.tools?.length) {
+    console.log(
+      "GROK tools[0] =",
+      JSON.stringify(toOpenAiTools(req.tools)[0], null, 2),
+    );
+  }
+
+  // Debug dump request "shape" (no secrets)
+  dump(traceId, "grok.request.shape", {
+    model: req.model || config.grok.model,
+    temperature: req.temperature ?? 0.2,
+    max_output_tokens: maxOutputTokens,
+    tools_count: req.tools?.length ?? 0,
+    force_tool_choice: envFlag("GROK_FORCE_TOOL_CHOICE"),
+  });
+
+  const forceTool = envFlag("GROK_FORCE_TOOL_CHOICE");
+
   const res = await client.responses.create({
     model: req.model || config.grok.model,
     input: toOpenAiInput(req.messages),
@@ -176,17 +261,30 @@ export async function grokChat(req: LlmRequest): Promise<LlmResponse> {
     ...(req.tools && req.tools.length
       ? { tools: toOpenAiTools(req.tools) }
       : {}),
+    ...(forceTool && req.tools && req.tools.length
+      ? { tool_choice: { type: "function", name: req.tools[0].name } }
+      : {}),
   });
+
+  // Dump raw response so we can adapt parsing to reality
+  dump(traceId, "grok.response.raw", res);
+
+  const outTypes = Array.isArray((res as any)?.output)
+    ? (res as any).output.map((x: any) => x?.type).filter(Boolean)
+    : [];
+  console.log("GROK trace", traceId, "output types =", outTypes);
 
   const text = extractText(res);
   const toolCalls = extractToolCalls(res);
+
+  dump(traceId, "grok.extract.text", { text });
+  dump(traceId, "grok.extract.toolcalls", toolCalls);
 
   const message: AssistantMessage = toolCalls.length
     ? { role: "assistant", content: text, toolCalls }
     : { role: "assistant", content: text };
 
-  // We often don’t get a reliable finish reason from compatibles; best-effort.
-  // If res has "status" or "finish_reason", you can map it later.
+  // Best-effort finish reason
   const finishReason = toolCalls.length ? "tool_call" : "unknown";
 
   const usage = normalizeUsage(res);

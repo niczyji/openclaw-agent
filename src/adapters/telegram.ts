@@ -1,7 +1,8 @@
 // src/adapters/telegram.ts
 import TelegramBot from "node-telegram-bot-api";
-import { sendLongMessage } from "./telegram-utils.js";
+import { randomUUID } from "crypto";
 
+import { sendLongMessage } from "./telegram-utils.js";
 import { getOrCreateSession, saveSession } from "../memory/store.js";
 import { deleteSession } from "../memory/sessions.js";
 import { runAgentToolLoop } from "../core/toolloop.js";
@@ -164,6 +165,9 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
   bot.on("message", async (msg) => {
     const chatId = msg.chat.id;
     const text = (msg.text ?? "").trim();
+    const traceId = randomUUID().slice(0, 8);
+
+    console.log("TG trace", traceId, "message", { chatId, text });
 
     try {
       // Access control
@@ -244,13 +248,16 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
       const isDev = /^\/dev(\s|$)/i.test(text);
       const builderMode = isDev;
 
-      const userInput = isDev ? text.replace(/^\/dev\s*/i, "") : text;
-      if (isDev && !userInput.trim()) {
+      const rawUserInput = isDev ? text.replace(/^\/dev\s*/i, "") : text;
+      if (isDev && !rawUserInput.trim()) {
         await sendLongMessage(bot, chatId, "Usage: /dev <your request>");
         return;
       }
 
       const purpose = isDev ? "dev" : "default";
+
+      // Put trace into user input (so it can be forwarded without changing types)
+      const userInput = `[trace:${traceId}] ${rawUserInput}`;
 
       const sessionId = `tg-${chatId}`;
       const session = await getOrCreateSession(sessionId);
@@ -258,7 +265,7 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
       await sendLongMessage(
         bot,
         chatId,
-        `🧠 Working… (session ${sessionId}, ${purpose})`,
+        `🧠 Working… (session ${sessionId}, ${purpose}, trace ${traceId})`,
       );
 
       // Approval function (CLI-like policy)
@@ -290,7 +297,7 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
           return true;
         }
 
-        // Everything else: keep your interactive approval UX
+        // Everything else: interactive approval UX
         const key = `${chatId}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
 
         const sent = await sendLongMessage(
@@ -331,12 +338,14 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
         });
       };
 
+      // Pass traceId through options (duck-typed) so providers can dump per-trace
       const res = await runAgentToolLoop(session, {
         purpose,
         input: userInput,
         maxSteps: 3,
         approve,
-      });
+        traceId,
+      } as any);
 
       await saveSession(session);
 
@@ -349,7 +358,7 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
         purpose,
         provider: (res as any).provider,
         model: (res as any).model,
-        details: { usage: usageNorm },
+        details: { traceId, usage: usageNorm },
       });
 
       let footer = "";
@@ -362,7 +371,7 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
       await sendLongMessage(
         bot,
         chatId,
-        `✅ [${(res as any).provider}/${(res as any).model}]\n\n${(res as any).text}${footer}`,
+        `✅ [${(res as any).provider}/${(res as any).model}] (trace ${traceId})\n\n${(res as any).text}${footer}`,
       );
     } catch (e: any) {
       await logEvent({
@@ -383,7 +392,11 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
   bot.on("callback_query", async (q) => {
     try {
       if (!q.data || !q.message) return;
-      console.log("TG callback_query data:", q.data);
+      console.log("TG callback_query", {
+        data: q.data,
+        from: q.from?.id,
+        chatId: q.message.chat.id,
+      });
       const chatId = q.message.chat.id;
 
       if (allowed && !allowed.has(chatId)) {
