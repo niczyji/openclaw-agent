@@ -10,7 +10,13 @@ export type WriteFileCall = Readonly<{
 }>;
 export type ListDirCall = Readonly<{ tool: "list_dir"; path: string }>;
 
-export type ToolCall = ReadFileCall | WriteFileCall | ListDirCall;
+export type CalculatorCall = { tool: "calculator"; expression: string };
+
+export type ToolCall =
+  | ReadFileCall
+  | WriteFileCall
+  | ListDirCall
+  | CalculatorCall;
 
 /** Results */
 export type ReadFileResult = Readonly<{

@@ -151,6 +151,14 @@ function toInternalToolCall(name: string, args: unknown): ToolCall {
     throw new Error(`Tool args must be an object for ${name}`);
   }
 
+  if (name === "calculator") {
+    const exprArg = args.expression;
+    if (typeof exprArg !== "string") {
+      throw new Error("calculator requires { expression: string }");
+    }
+    return { tool: "calculator", expression: exprArg };
+  }
+
   if (name === "read_file") {
     const pathArg = args.path;
     if (typeof pathArg !== "string")

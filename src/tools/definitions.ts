@@ -48,8 +48,22 @@ export const WRITE_FILE_TOOL: ToolDefinition = {
   }),
 };
 
+export const CALCULATOR_TOOL: ToolDefinition = {
+  name: "calculator",
+  description:
+    "Evaluate a basic arithmetic expression like 2+2 or (10/2)+7. Returns JSON with the numeric result.",
+  parameters: sObject({
+    properties: {
+      expression: sString(),
+    },
+    required: ["expression"],
+    additionalProperties: false,
+  }),
+};
+
 export const ALL_TOOLS: readonly ToolDefinition[] = [
   READ_FILE_TOOL,
   LIST_DIR_TOOL,
   WRITE_FILE_TOOL,
+  CALCULATOR_TOOL,
 ] as const;
