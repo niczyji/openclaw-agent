@@ -51,6 +51,7 @@ type Args = {
 
   provider?: string;
   model?: string;
+  command?: string;
 };
 
 function parseArgs(argv: string[]): Args {
@@ -102,6 +103,7 @@ function parseArgs(argv: string[]): Args {
     else if (a === "--yes") yes = true;
     else if (a === "--provider") provider = argv[++i];
     else if (a === "--model") model = argv[++i];
+    else if (a === "--command") command = argv[++i];
     else rest.push(a);
   }
 
@@ -239,7 +241,12 @@ export async function main(argv: string[]) {
                 content: args.content ?? "",
                 overwrite: args.overwrite ?? false,
               }
-            : null;
+            : args.tool === "run_cmd"
+              ? {
+                  tool: "run_cmd" as const,
+                  command: args.command ?? "git status",
+                }
+              : null;
 
     if (!call) {
       console.error(`Unknown tool: ${args.tool}`);

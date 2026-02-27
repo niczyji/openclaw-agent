@@ -6,9 +6,11 @@ import type {
   ToolCall,
   ToolMessage,
   Usage,
-} from "./types";
-import { makeUsage } from "./types";
-import { chat } from "./router";
+  Purpose,
+} from "./types.js";
+import { makeUsage } from "./types.js";
+import { chat } from "./router.js";
+
 import {
   createBudget,
   bookModelCall,
@@ -16,15 +18,15 @@ import {
   bookUsage,
   canCallModel,
   type ToolKind,
-} from "./budget";
+} from "./budget.js";
 
 import type { Session } from "../memory/store.js";
-import type { Purpose } from "./types.js";
-import type { LlmMessage, ToolCall, LlmResponse } from "./types.js";
+import { runToolFromModelCall } from "../tools/registry.js";
+import { classifyTool } from "../tools/policy.js";
+import { ALL_TOOLS } from "../tools/definitions.js";
 
-import { runToolFromModelCall } from "../tools/registry";
-import { classifyTool } from "../tools/policy";
-import { ALL_TOOLS } from "../tools/definitions";
+// If your project doesn't have this, delete the logEvent calls below.
+import { logEvent } from "../logger.js";
 
 export type ToolLoopOptions = Readonly<{
   request: Omit<LlmRequest, "messages"> & { messages: readonly LlmMessage[] };
@@ -74,11 +76,20 @@ function toolKind(name: string): ToolKind {
   }
 }
 
+function safeMaxOutputTokens(x: unknown, fallback = 2048): number {
+  const n = typeof x === "number" ? x : Number(x);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.max(1, Math.trunc(n));
+}
+
 export async function runToolLoop(
   opts: ToolLoopOptions,
 ): Promise<ToolLoopResult> {
   const maxSteps = opts.limits?.maxSteps ?? 6;
   const maxToolCalls = opts.limits?.maxToolCalls ?? 12;
+
+  // The toolloop needs to pass purpose into tools/policy.
+  const purpose: Purpose = opts.request.purpose === "dev" ? "dev" : "runtime";
 
   let budget = createBudget({
     maxSteps,
@@ -106,7 +117,7 @@ export async function runToolLoop(
     const req: LlmRequest = {
       ...opts.request,
       messages,
-      maxOutputTokens: Math.max(1, Math.trunc(opts.request.maxOutputTokens)),
+      maxOutputTokens: safeMaxOutputTokens(opts.request.maxOutputTokens, 2048),
       tools: opts.request.tools ?? ALL_TOOLS,
     };
 
@@ -127,13 +138,14 @@ export async function runToolLoop(
       const kind = toolKind(call.name);
       budget = bookToolCall(budget, kind);
 
-      const approved = await opts.approve(call);
-
-      logEvent({
+      // Approve UX (human-in-the-loop)
+      logEvent?.({
         level: "info",
         event: "toolloop_approve_prompt",
-        details: { tool: call.name ?? call.tool, id: call.id },
+        details: { tool: call.name, id: call.id },
       });
+
+      const approved = await opts.approve(call);
 
       if (!approved) {
         const denied: ToolMessage = {
@@ -141,7 +153,11 @@ export async function runToolLoop(
           name: call.name,
           toolCallId: call.id,
           content: JSON.stringify(
-            { ok: false, error: "Tool call denied by policy/approval." },
+            {
+              ok: false,
+              tool: call.name,
+              error: "Tool call denied by policy/approval.",
+            },
             null,
             2,
           ),
@@ -152,14 +168,21 @@ export async function runToolLoop(
 
       let toolOut: string;
       try {
-        toolOut = await runToolFromModelCall({
-          id: call.id,
-          name: call.name,
-          argumentsJson: call.argumentsJson,
-        });
+        toolOut = await runToolFromModelCall(
+          {
+            id: call.id,
+            name: call.name,
+            argumentsJson: call.argumentsJson,
+          },
+          { purpose },
+        );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        toolOut = JSON.stringify({ ok: false, tool: call.name, error: msg });
+        toolOut = JSON.stringify(
+          { ok: false, tool: call.name, error: msg },
+          null,
+          2,
+        );
       }
 
       const toolMsg: ToolMessage = {
@@ -197,18 +220,17 @@ export async function runAgentToolLoop(
       content:
         opts.system ??
         "You are a helpful assistant. Keep answers concise unless asked otherwise.",
-    } as LlmMessage,
+    },
     ...history,
-    { role: "user", content: opts.input } as LlmMessage,
+    { role: "user", content: opts.input },
   ];
 
   const { final } = await runToolLoop({
     request: {
       purpose: opts.purpose,
-      provider: opts.provider, // optional, router can resolve if undefined
-      model: opts.model, // optional, router can resolve if undefined
+      provider: opts.provider,
+      model: opts.model,
       messages,
-      // optional safety default:
       maxOutputTokens: 2048,
       // tools omitted => toolloop uses ALL_TOOLS fallback
     } as any,

@@ -1,198 +1,320 @@
 // tools/registry.ts
-import { promises as fs } from "node:fs";
+import fs from "node:fs/promises";
 import path from "node:path";
-import { assertAllowedPath } from "./policy.ts";
-import type { ToolCall, ToolResult } from "./types.ts";
+import crypto from "node:crypto";
+import { spawn } from "node:child_process";
 
-const MAX_READ_BYTES = 200_000; // 200 KB
-const MAX_DIR_ENTRIES = 200;
+import type { Purpose } from "../core/types.js";
+import { assertAllowedPath, assertAllowedCommand } from "./policy.ts";
 
-function redactSecrets(text: string): string {
-  const patterns: Array<[RegExp, string]> = [
-    [/(API_KEY\s*=\s*)(.+)/gi, "$1***REDACTED***"],
-    [/(GROK_API_KEY\s*=\s*)(.+)/gi, "$1***REDACTED***"],
-    [/(OPENAI_API_KEY\s*=\s*)(.+)/gi, "$1***REDACTED***"],
-    [/(ANTHROPIC_API_KEY\s*=\s*)(.+)/gi, "$1***REDACTED***"],
-    [/(TOKEN\s*=\s*)(.+)/gi, "$1***REDACTED***"],
-    [/(SECRET\s*=\s*)(.+)/gi, "$1***REDACTED***"],
-    [/(PASSWORD\s*=\s*)(.+)/gi, "$1***REDACTED***"],
-  ];
+export type ToolCtx = { purpose: Purpose };
 
-  let out = text;
-  for (const [re, repl] of patterns) out = out.replace(re, repl);
-  return out;
+type ModelToolCall = {
+  id: string;
+  name: string;
+  argumentsJson: string;
+};
+
+// Safety caps (adjust as needed)
+const MAX_READ_CHARS = 50_000;
+const MAX_LIST_ENTRIES = 300;
+const MAX_CMD_OUT = 8_000;
+const RUN_CMD_TIMEOUT_MS = 10_000;
+
+// -------------------------
+// Helpers
+// -------------------------
+function ok(tool: string, result: any) {
+  return { ok: true, tool, result };
+}
+function fail(tool: string, error: string, details?: any) {
+  return { ok: false, tool, error, details };
 }
 
-export async function runTool(call: ToolCall): Promise<ToolResult> {
+function asString(x: any): string {
+  if (typeof x === "string") return x;
+  return String(x ?? "");
+}
+
+function truncate(s: string, max: number) {
+  if (s.length <= max) return { text: s, truncated: false };
+  return { text: s.slice(0, max), truncated: true };
+}
+
+async function atomicWrite(fullPath: string, content: string) {
+  const dir = path.dirname(fullPath);
+  await fs.mkdir(dir, { recursive: true });
+
+  const tmp = path.join(
+    dir,
+    `.tmp-${path.basename(fullPath)}-${crypto.randomUUID()}`,
+  );
+
+  await fs.writeFile(tmp, content, "utf8");
+  await fs.rename(tmp, fullPath);
+}
+
+// -------------------------
+// Tool implementations
+// -------------------------
+async function toolReadFile(args: any, ctx: ToolCtx) {
+  const userPath = asString(args?.path);
+  if (!userPath) return fail("read_file", "Missing required field: path");
+
+  const full = await assertAllowedPath(userPath, {
+    kind: "read",
+    purpose: ctx.purpose,
+  });
+
+  const raw = await fs.readFile(full, "utf8");
+  const { text, truncated } = truncate(raw, MAX_READ_CHARS);
+
+  return ok("read_file", {
+    path: userPath,
+    bytes: Buffer.byteLength(raw, "utf8"),
+    truncated,
+    content: text,
+  });
+}
+
+async function toolListDir(args: any, ctx: ToolCtx) {
+  const userPath = asString(args?.path || ".");
+  const full = await assertAllowedPath(userPath, {
+    kind: "read",
+    purpose: ctx.purpose,
+  });
+
+  const entries = await fs.readdir(full, { withFileTypes: true });
+
+  const mapped = entries.slice(0, MAX_LIST_ENTRIES).map((e) => ({
+    name: e.name,
+    type: e.isDirectory()
+      ? "dir"
+      : e.isFile()
+        ? "file"
+        : e.isSymbolicLink()
+          ? "symlink"
+          : "other",
+  }));
+
+  return ok("list_dir", {
+    path: userPath,
+    capped: entries.length > MAX_LIST_ENTRIES,
+    entries: mapped,
+  });
+}
+
+async function toolWriteFile(args: any, ctx: ToolCtx) {
+  const userPath = asString(args?.path);
+  const content = asString(args?.content);
+  const overwrite = Boolean(args?.overwrite);
+
+  if (!userPath) return fail("write_file", "Missing required field: path");
+  if (args?.content === undefined)
+    return fail("write_file", "Missing required field: content");
+
+  const full = await assertAllowedPath(userPath, {
+    kind: "write",
+    purpose: ctx.purpose,
+  });
+
+  // overwrite gating
   try {
-    if (call.tool === "read_file") {
-      const full = assertAllowedPath(call.path);
-
-      const st = await fs.stat(full);
-      if (st.size > MAX_READ_BYTES) {
-        return {
-          ok: false,
-          tool: call.tool,
-          error: `File too large (${st.size} bytes). Max is ${MAX_READ_BYTES}.`,
-        };
-      }
-
-      let content = await fs.readFile(full, "utf8");
-      content = redactSecrets(content);
-
-      const MAX_CHARS = 4000;
-      let truncated = false;
-      if (content.length > MAX_CHARS) {
-        content = content.slice(0, MAX_CHARS) + "\n\n...TRUNCATED...\n";
-        truncated = true;
-      }
-
-      return {
-        ok: true,
-        tool: call.tool,
-        result: { path: call.path, bytes: st.size, truncated, content },
-      };
+    await fs.stat(full);
+    if (!overwrite) {
+      return fail(
+        "write_file",
+        "File exists. Set overwrite=true to overwrite.",
+      );
     }
+  } catch {
+    // file does not exist -> ok
+  }
 
-    if (call.tool === "list_dir") {
-      const full = assertAllowedPath(call.path);
+  await atomicWrite(full, content);
 
-      const entries = await fs.readdir(full, { withFileTypes: true });
-      const sliced = entries.slice(0, MAX_DIR_ENTRIES);
+  return ok("write_file", {
+    path: userPath,
+    bytes: Buffer.byteLength(content, "utf8"),
+    overwritten: overwrite,
+  });
+}
 
-      return {
-        ok: true,
-        tool: call.tool,
-        result: {
-          path: call.path,
-          totalEntries: entries.length,
-          returnedEntries: sliced.length,
-          entries: sliced.map((e) => ({
-            name: e.name,
-            type: e.isDirectory() ? "dir" : "file",
-          })),
-        },
-      };
-    }
+async function toolCalculator(args: any) {
+  const expr = asString(args?.expression);
+  if (!expr) return fail("calculator", "Missing required field: expression");
 
-    if (call.tool === "write_file") {
-      const full = assertAllowedPath(call.path);
+  // Debug-safe: only allow simple math chars
+  if (!/^[0-9+\-*/().\s]+$/.test(expr)) {
+    return fail(
+      "calculator",
+      "Bad expression (allowed: digits, + - * / ( ) . whitespace)",
+    );
+  }
 
-      // write_file restricted to data/outputs/*
-      const outRoot = assertAllowedPath("data/outputs");
-      if (!full.startsWith(outRoot + path.sep) && full !== outRoot) {
-        throw new Error(
-          `write_file restricted to data/outputs/* (got: ${call.path})`,
-        );
-      }
-
-      await fs.mkdir(path.dirname(full), { recursive: true });
-
-      if (!call.overwrite) {
-        try {
-          await fs.access(full);
-          throw new Error(`File exists (set --overwrite): ${call.path}`);
-        } catch (e: any) {
-          if (e?.code !== "ENOENT") throw e;
-        }
-      }
-
-      await fs.writeFile(full, call.content, "utf8");
-      return {
-        ok: true,
-        tool: call.tool,
-        result: { path: call.path, bytes: call.content.length },
-      };
-    }
-
-    return { ok: false, tool: call.tool, error: "Unknown tool" };
+  try {
+    // Still eval-ish; acceptable as infra test tool.
+    const value = Function(`"use strict"; return (${expr});`)();
+    return ok("calculator", { expression: expr, value });
   } catch (e: any) {
-    return { ok: false, tool: call.tool, error: String(e?.message ?? e) };
+    return fail("calculator", `Eval failed: ${String(e?.message ?? e)}`);
   }
 }
 
+async function toolRunCmd(args: any) {
+  const command = asString(args?.command);
+  if (!command) return fail("run_cmd", "Missing required field: command");
+
+  const cmd = assertAllowedCommand(command); // exact-match allowlist
+
+  const [bin, ...binArgs] = cmd.split(" ");
+
+  return await new Promise((resolve) => {
+    const child = spawn(bin, binArgs, {
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: process.env,
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    const killTimer = setTimeout(() => {
+      child.kill("SIGKILL");
+    }, RUN_CMD_TIMEOUT_MS);
+
+    child.stdout.on("data", (d) => (stdout += String(d)));
+    child.stderr.on("data", (d) => (stderr += String(d)));
+
+    child.on("close", (code) => {
+      clearTimeout(killTimer);
+
+      const outT = truncate(stdout, MAX_CMD_OUT);
+      const errT = truncate(stderr, MAX_CMD_OUT);
+
+      resolve(
+        ok("run_cmd", {
+          command: cmd,
+          code,
+          ok: code === 0,
+          stdout: outT.text,
+          stdoutTruncated: outT.truncated,
+          stderr: errT.text,
+          stderrTruncated: errT.truncated,
+        }),
+      );
+    });
+  });
+}
+
+// tools/registry.ts (ADD THIS)
+export type ManualToolCall =
+  | { tool: "read_file"; path: string }
+  | { tool: "list_dir"; path: string }
+  | { tool: "write_file"; path: string; content: string; overwrite?: boolean }
+  | { tool: "calculator"; expression: string }
+  | { tool: "run_cmd"; command: string };
+
+export type ManualToolResult =
+  | { ok: true; tool: string; result: any }
+  | { ok: false; tool: string; error: string; details?: any };
+
 /**
- * Bridge: model ToolCall {name, argumentsJson} -> internal ToolCall union -> ToolResult -> string
- * This is what core/toolloop.ts should call.
+ * Legacy/manual tool runner for CLI (returns object, not JSON string).
+ * Default purpose: runtime.
  */
-export async function runToolFromModelCall(input: {
-  name: string;
-  argumentsJson: string;
-}): Promise<string> {
-  let args: unknown;
+export async function runTool(
+  call: ManualToolCall,
+  ctx: ToolCtx = { purpose: "runtime" as Purpose },
+): Promise<ManualToolResult> {
   try {
-    args = JSON.parse(input.argumentsJson) as unknown;
-  } catch (e) {
+    switch (call.tool) {
+      case "read_file":
+        return await toolReadFile({ path: call.path }, ctx);
+      case "list_dir":
+        return await toolListDir({ path: call.path }, ctx);
+      case "write_file":
+        return await toolWriteFile(
+          {
+            path: call.path,
+            content: call.content,
+            overwrite: call.overwrite ?? false,
+          },
+          ctx,
+        );
+      case "calculator":
+        return await toolCalculator({ expression: (call as any).expression });
+      case "run_cmd":
+        return await toolRunCmd({ command: (call as any).command });
+      default:
+        return {
+          ok: false,
+          tool: (call as any)?.tool ?? "unknown",
+          error: "Unknown tool",
+        };
+    }
+  } catch (e: any) {
+    return {
+      ok: false,
+      tool: (call as any)?.tool ?? "unknown",
+      error: String(e?.message ?? e),
+      details: e?.stack,
+    };
+  }
+}
+
+// -------------------------
+// Public entrypoint
+// -------------------------
+export async function runToolFromModelCall(
+  call: ModelToolCall,
+  ctx: ToolCtx,
+): Promise<string> {
+  const tool = call?.name || "unknown";
+
+  let args: any = {};
+  try {
+    args = call?.argumentsJson ? JSON.parse(call.argumentsJson) : {};
+  } catch (e: any) {
     return JSON.stringify(
-      {
-        ok: false,
-        tool: input.name,
-        error: "Invalid JSON arguments",
-        details: String(e),
-      },
+      fail(tool, `Invalid argumentsJson: ${String(e?.message ?? e)}`),
       null,
       2,
     );
   }
 
-  // Strict mapping into your ToolCall union (no any)
-  const call = toInternalToolCall(input.name, args);
-  const result = await runTool(call);
+  try {
+    let out: any;
 
-  return JSON.stringify(result, null, 2);
-}
+    switch (tool) {
+      case "read_file":
+        out = await toolReadFile(args, ctx);
+        break;
+      case "list_dir":
+        out = await toolListDir(args, ctx);
+        break;
+      case "write_file":
+        out = await toolWriteFile(args, ctx);
+        break;
+      case "calculator":
+        out = await toolCalculator(args);
+        break;
 
-function isRecord(x: unknown): x is Record<string, unknown> {
-  return typeof x === "object" && x !== null;
-}
+      // Optional tool: only works if you added it to definitions + policy
+      case "run_cmd":
+        out = await toolRunCmd(args);
+        break;
 
-function toInternalToolCall(name: string, args: unknown): ToolCall {
-  if (!isRecord(args)) {
-    throw new Error(`Tool args must be an object for ${name}`);
-  }
-
-  if (name === "calculator") {
-    const exprArg = args.expression;
-    if (typeof exprArg !== "string") {
-      throw new Error("calculator requires { expression: string }");
-    }
-    return { tool: "calculator", expression: exprArg };
-  }
-
-  if (name === "read_file") {
-    const pathArg = args.path;
-    if (typeof pathArg !== "string")
-      throw new Error("read_file requires { path: string }");
-    return { tool: "read_file", path: pathArg };
-  }
-
-  if (name === "list_dir") {
-    const pathArg = args.path;
-    if (typeof pathArg !== "string")
-      throw new Error("list_dir requires { path: string }");
-    return { tool: "list_dir", path: pathArg };
-  }
-
-  if (name === "write_file") {
-    const pathArg = args.path;
-    const contentArg = args.content;
-    const overwriteArg = args.overwrite;
-
-    if (typeof pathArg !== "string")
-      throw new Error("write_file requires { path: string, content: string }");
-    if (typeof contentArg !== "string")
-      throw new Error("write_file requires { content: string }");
-    if (overwriteArg !== undefined && typeof overwriteArg !== "boolean") {
-      throw new Error("write_file overwrite must be boolean if provided");
+      default:
+        out = fail(tool, "Unknown tool");
     }
 
-    return {
-      tool: "write_file",
-      path: pathArg,
-      content: contentArg,
-      overwrite: overwriteArg ?? false,
-    };
+    return JSON.stringify(out, null, 2);
+  } catch (e: any) {
+    return JSON.stringify(
+      fail(tool, String(e?.message ?? e), e?.stack),
+      null,
+      2,
+    );
   }
-
-  throw new Error(`Unknown tool name: ${name}`);
 }

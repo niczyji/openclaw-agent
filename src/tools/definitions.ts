@@ -48,6 +48,17 @@ export const WRITE_FILE_TOOL: ToolDefinition = {
   }),
 };
 
+export const RUN_CMD_TOOL: ToolDefinition = {
+  name: "run_cmd",
+  description:
+    "Run a safe allowlisted command for verification (e.g., npm test, npm run build, tsc --noEmit, git status). Exact-match allowlist. Returns stdout/stderr.",
+  parameters: sObject({
+    properties: { command: sString() },
+    required: ["command"],
+    additionalProperties: false,
+  }),
+};
+
 export const CALCULATOR_TOOL: ToolDefinition = {
   name: "calculator",
   description:
@@ -66,4 +77,5 @@ export const ALL_TOOLS: readonly ToolDefinition[] = [
   LIST_DIR_TOOL,
   WRITE_FILE_TOOL,
   CALCULATOR_TOOL,
+  RUN_CMD_TOOL,
 ] as const;

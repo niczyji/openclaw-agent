@@ -6,6 +6,7 @@ export type ProviderId = "grok" | "anthropic" | "openai" | "mistral" | "local";
 
 export type LlmRole = "system" | "user" | "assistant" | "tool";
 
+export type Purpose = "runtime" | "dev";
 /**
  * Internal canonical usage format.
  * Everything provider-specific must be normalized into this shape.
