@@ -277,14 +277,7 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
 
         // write_file: only in /dev AND only for admins
         if (toolName === "write_file") {
-          if (!builderMode) {
-            await sendLongMessage(
-              bot,
-              chatId,
-              "❌ write_file is only available in /dev mode.",
-            );
-            return false;
-          }
+          // optional: keep admin restriction
           if (!admins.has(chatId)) {
             await sendLongMessage(
               bot,
@@ -293,8 +286,32 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
             );
             return false;
           }
-          // Auto-approve in /dev for admins (no buttons)
-          return true;
+
+          // Runtime-safe: allow only data/outputs/*
+          try {
+            const a = JSON.parse(call?.argumentsJson ?? "{}");
+            const p = String(a?.path ?? "");
+            const isSafe = p.startsWith("data/outputs/");
+            const isDevMode = builderMode; // /dev
+
+            if (!isDevMode && !isSafe) {
+              await sendLongMessage(
+                bot,
+                chatId,
+                `❌ write_file in runtime is restricted to data/outputs/* (got: ${p})`,
+              );
+              return false;
+            }
+          } catch {
+            await sendLongMessage(
+              bot,
+              chatId,
+              "❌ write_file: invalid arguments.",
+            );
+            return false;
+          }
+
+          return true; // auto-approve write_file for admins (or make it buttons if you want)
         }
 
         // Everything else: interactive approval UX

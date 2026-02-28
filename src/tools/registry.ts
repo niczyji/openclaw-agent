@@ -268,10 +268,11 @@ export async function runTool(
 // -------------------------
 export async function runToolFromModelCall(
   call: ModelToolCall,
-  ctx: ToolCtx,
+  ctx?: ToolCtx,
 ): Promise<string> {
-  const tool = call?.name || "unknown";
+  const safeCtx: ToolCtx = ctx ?? ({ purpose: "runtime" } as any);
 
+  const tool = call?.name || "unknown";
   let args: any = {};
   try {
     args = call?.argumentsJson ? JSON.parse(call.argumentsJson) : {};
@@ -285,30 +286,25 @@ export async function runToolFromModelCall(
 
   try {
     let out: any;
-
     switch (tool) {
       case "read_file":
-        out = await toolReadFile(args, ctx);
+        out = await toolReadFile(args, safeCtx);
         break;
       case "list_dir":
-        out = await toolListDir(args, ctx);
+        out = await toolListDir(args, safeCtx);
         break;
       case "write_file":
-        out = await toolWriteFile(args, ctx);
+        out = await toolWriteFile(args, safeCtx);
         break;
       case "calculator":
         out = await toolCalculator(args);
         break;
-
-      // Optional tool: only works if you added it to definitions + policy
       case "run_cmd":
         out = await toolRunCmd(args);
         break;
-
       default:
         out = fail(tool, "Unknown tool");
     }
-
     return JSON.stringify(out, null, 2);
   } catch (e: any) {
     return JSON.stringify(

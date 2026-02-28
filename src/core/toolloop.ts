@@ -89,7 +89,8 @@ export async function runToolLoop(
   const maxToolCalls = opts.limits?.maxToolCalls ?? 12;
 
   // The toolloop needs to pass purpose into tools/policy.
-  const purpose: Purpose = opts.request.purpose === "dev" ? "dev" : "runtime";
+  type PolicyPurpose = "runtime" | "dev";
+  const policyPurpose = opts.request.purpose === "dev" ? "dev" : "runtime";
 
   let budget = createBudget({
     maxSteps,
@@ -174,7 +175,7 @@ export async function runToolLoop(
             name: call.name,
             argumentsJson: call.argumentsJson,
           },
-          { purpose },
+          { purpose: policyPurpose as any },
         );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
