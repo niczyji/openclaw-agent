@@ -3,6 +3,10 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
+import { stageFile } from "../core/builder/stage";
+import { diffOperation } from "../core/builder/diff";
+import { applyOperation } from "../core/builder/apply";
+import { rollbackOperation } from "../core/builder/rollback";
 
 import type { Purpose } from "../core/types.js";
 import { assertAllowedPath, assertAllowedCommand } from "./policy.ts";
@@ -213,7 +217,17 @@ export type ManualToolCall =
   | { tool: "list_dir"; path: string }
   | { tool: "write_file"; path: string; content: string; overwrite?: boolean }
   | { tool: "calculator"; expression: string }
-  | { tool: "run_cmd"; command: string };
+  | { tool: "run_cmd"; command: string }
+  | {
+      tool: "stage_file";
+      opId?: string;
+      targetPath: string;
+      content: string;
+      note?: string;
+    }
+  | { tool: "diff_op"; opId: string }
+  | { tool: "apply_patch"; opId: string }
+  | { tool: "rollback"; opId: string };
 
 export type ManualToolResult =
   | { ok: true; tool: string; result: any }
@@ -246,6 +260,14 @@ export async function runTool(
         return await toolCalculator({ expression: (call as any).expression });
       case "run_cmd":
         return await toolRunCmd({ command: (call as any).command });
+      case "stage_file":
+        return ok("stage_file", await stageFile(call as any));
+      case "diff_op":
+        return ok("diff_op", await diffOperation((call as any).opId));
+      case "apply_patch":
+        return ok("apply_patch", await applyOperation((call as any).opId));
+      case "rollback":
+        return ok("rollback", await rollbackOperation((call as any).opId));
       default:
         return {
           ok: false,
@@ -301,6 +323,29 @@ export async function runToolFromModelCall(
         break;
       case "run_cmd":
         out = await toolRunCmd(args);
+        break;
+      case "stage_file":
+        out = ok(
+          "stage_file",
+          await stageFile({
+            opId: args?.opId,
+            targetPath: args?.targetPath,
+            content: args?.content,
+            note: args?.note,
+          }),
+        );
+        break;
+
+      case "diff_op":
+        out = ok("diff_op", await diffOperation(asString(args?.opId)));
+        break;
+
+      case "apply_patch":
+        out = ok("apply_patch", await applyOperation(asString(args?.opId)));
+        break;
+
+      case "rollback":
+        out = ok("rollback", await rollbackOperation(asString(args?.opId)));
         break;
       default:
         out = fail(tool, "Unknown tool");

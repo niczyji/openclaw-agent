@@ -7,6 +7,24 @@ export type ProviderId = "grok" | "anthropic" | "openai" | "mistral" | "local";
 export type LlmRole = "system" | "user" | "assistant" | "tool";
 
 export type Purpose = "runtime" | "dev";
+
+export type BuilderStatus = "staged" | "applied" | "rolled_back" | "discarded";
+
+export interface BuilderFile {
+  targetPath: string; // np. "src/core/router.ts"
+  stagedPath: string; // np. "data/patches/staged/<id>/src/core/router.ts"
+}
+
+export interface BuilderOperation {
+  id: string;
+  createdAt: string; // ISO
+  status: BuilderStatus;
+  files: BuilderFile[];
+  note?: string;
+  appliedAt?: string;
+  rolledBackAt?: string;
+}
+
 /**
  * Internal canonical usage format.
  * Everything provider-specific must be normalized into this shape.

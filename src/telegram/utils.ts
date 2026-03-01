@@ -9,7 +9,7 @@ import { sendLongMessage } from "../telegram/utils.js";
 import { promises as fs } from "fs";
 import path from "path";
 import crypto from "crypto";
-var SESS_DIR = path.resolve("data/sessions");
+const SESS_DIR = path.resolve("data/sessions");
 function nowISO() {
   return /* @__PURE__ */ new Date().toISOString();
 }
@@ -63,7 +63,7 @@ function requireEnv(name) {
   if (!v) throw new Error(`Missing required env variable: ${name}`);
   return v;
 }
-var config = {
+const config = {
   providers: {
     default: "grok",
     dev: "anthropic",
@@ -81,7 +81,7 @@ var config = {
 
 // src/providers/grok.ts
 import OpenAI from "openai";
-var client = new OpenAI({
+const client = new OpenAI({
   apiKey: config.grok.apiKey,
   baseURL: config.grok.baseURL,
 });
@@ -110,7 +110,7 @@ async function grokChat(req) {
 
 // src/providers/anthropic.ts
 import Anthropic from "@anthropic-ai/sdk";
-var client2 = new Anthropic({
+const client2 = new Anthropic({
   apiKey: config.anthropic.apiKey ?? "",
 });
 function toAnthropicMessages(messages) {
@@ -175,8 +175,8 @@ import path3 from "path";
 
 // src/tools/policy.ts
 import path2 from "path";
-var PROJECT_ROOT = process.cwd();
-var ALLOWED_PREFIXES = [
+const PROJECT_ROOT = process.cwd();
+const ALLOWED_PREFIXES = [
   "src",
   "data",
   "logs",
@@ -184,8 +184,8 @@ var ALLOWED_PREFIXES = [
   "README.md",
   "package.json",
 ].map((p) => path2.resolve(PROJECT_ROOT, p));
-var DENY_SEGMENTS = /* @__PURE__ */ new Set([".git", "node_modules"]);
-var DENY_FILES = /* @__PURE__ */ new Set([
+const DENY_SEGMENTS = /* @__PURE__ */ new Set([".git", "node_modules"]);
+const DENY_FILES = /* @__PURE__ */ new Set([
   ".env",
   ".env.local",
   ".env.production",
@@ -214,8 +214,8 @@ function assertAllowedPath(userPath) {
 }
 
 // src/tools/registry.ts
-var MAX_READ_BYTES = 2e5;
-var MAX_DIR_ENTRIES = 200;
+const MAX_READ_BYTES = 2e5;
+const MAX_DIR_ENTRIES = 200;
 function redactSecrets(text) {
   const patterns = [
     [/(API_KEY\s*=\s*)(.+)/gi, "$1***REDACTED***"],
@@ -307,8 +307,8 @@ async function runTool(call) {
 // src/logger.ts
 import { promises as fs3 } from "fs";
 import path4 from "path";
-var LOG_DIR = path4.resolve("logs");
-var LOG_FILE = path4.join(LOG_DIR, "app.log");
+const LOG_DIR = path4.resolve("logs");
+const LOG_FILE = path4.join(LOG_DIR, "app.log");
 function nowISO2() {
   return /* @__PURE__ */ new Date().toISOString();
 }
@@ -541,7 +541,7 @@ ${JSON.stringify(toolRes, null, 2)}`,
 // src/memory/sessions.ts
 import { promises as fs4 } from "fs";
 import path5 from "path";
-var SESS_DIR2 = path5.resolve("data/sessions");
+const SESS_DIR2 = path5.resolve("data/sessions");
 function sessionPath2(id) {
   return path5.join(SESS_DIR2, `${id}.json`);
 }
@@ -675,16 +675,6 @@ sessionId: tg-${chatId}`,
         }
         return;
       }
-      const isDev = text.startsWith("/dev ");
-      const userInput = isDev ? text.replace(/^\/dev\s+/, "") : text;
-      const purpose = isDev ? "dev" : "default";
-      const sessionId = `tg-${chatId}`;
-      const session = await getOrCreateSession(sessionId);
-      await sendLongMessage(
-        bot,
-        chatId,
-        `\u{1F9E0} Working\u2026 (session ${sessionId}, ${purpose})`,
-      );
       const approve = async (call) => {
         if (call.tool === "write_file" && !admins.has(chatId)) {
           await sendLongMessage(

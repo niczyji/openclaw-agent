@@ -25,7 +25,7 @@ const READ_PREFIXES = [
 ].map((p) => path.resolve(PROJECT_ROOT, p));
 
 // Write roots (runtime) — only outputs:
-const WRITE_PREFIXES_RUNTIME = ["data/outputs"].map((p) =>
+const WRITE_PREFIXES_RUNTIME = ["data/outputs", "data/patches"].map((p) =>
   path.resolve(PROJECT_ROOT, p),
 );
 
@@ -168,8 +168,15 @@ export function assertAllowedCommand(command: string) {
  * Keep it dumb and deterministic.
  */
 export function classifyTool(name: string): ToolKind {
-  if (name === "read_file" || name === "list_dir") return "read";
-  if (name === "write_file") return "write";
+  if (name === "read_file" || name === "list_dir" || name === "diff_op")
+    return "read";
+
+  // staging writes only to data/patches (safe)
+  if (name === "write_file" || name === "stage_file") return "write";
+
+  // these mutate repo / restore from backups (still "write" for budgeting)
+  if (name === "apply_patch" || name === "rollback") return "write";
+
   if (name === "run_cmd") return "other";
   return "other";
 }

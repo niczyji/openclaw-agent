@@ -1,6 +1,8 @@
 // src/adapters/telegram.ts
 import TelegramBot from "node-telegram-bot-api";
 import { randomUUID } from "crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
 
 import { sendLongMessage } from "./telegram-utils.js";
 import { getOrCreateSession, saveSession } from "../memory/store.js";
@@ -8,11 +10,17 @@ import { deleteSession } from "../memory/sessions.js";
 import { runAgentToolLoop } from "../core/toolloop.js";
 import { logEvent, classifyError } from "../logger.js";
 
+// Builder (deterministic commands)
+import { diffOperation } from "../core/builder/diff.js";
+import { applyOperation } from "../core/builder/apply.js";
+import { rollbackOperation } from "../core/builder/rollback.js";
+import { loadOp, saveOp, appendLog } from "../core/builder/store.js";
+
 type StartTelegramAdapterOpts = {
   token: string;
 };
 
-// ========= Helpers (kleine Hilfsfunktionen) =========
+// ========= Helpers =========
 
 function parseIds(envName: string): Set<number> | null {
   const raw = process.env[envName]?.trim();
@@ -56,7 +64,7 @@ function normalizeUsageAny(
 ): { inputTokens: number; outputTokens: number; totalTokens: number } | null {
   if (!u) return null;
 
-  // Your current internal shape
+  // Internal shape
   if (typeof u.inputTokens === "number" && typeof u.outputTokens === "number") {
     const total =
       typeof u.totalTokens === "number"
@@ -85,7 +93,7 @@ function normalizeUsageAny(
     };
   }
 
-  // Responses/Anthropic-ish style
+  // Anthropic-ish / responses-ish style
   if (
     typeof u.input_tokens === "number" &&
     typeof u.output_tokens === "number"
@@ -138,6 +146,21 @@ function shortJson(x: any): string {
   return s.length > 3500 ? s.slice(0, 3500) + "\n...TRUNCATED..." : s;
 }
 
+async function findLatestOpId(): Promise<string | null> {
+  const dir = path.resolve(process.cwd(), "data/patches/staged");
+  try {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    const dirs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+    if (dirs.length === 0) return null;
+
+    // sort by name descending (your opId starts with ISO timestamp, so this works)
+    dirs.sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
+    return dirs[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ========= Main Adapter =========
 
 export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
@@ -177,13 +200,16 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
       }
       if (!text) return;
 
-      // Cooldown
+      // Cooldown (ignore command spam)
       if (
         cooldownSec > 0 &&
         !text.startsWith("/help") &&
         !text.startsWith("/start") &&
         !text.startsWith("/id") &&
-        !text.startsWith("/reset")
+        !text.startsWith("/reset") &&
+        !text.startsWith("/autopilot") &&
+        !text.startsWith("/devon") &&
+        !text.startsWith("/devoff")
       ) {
         const now = Date.now();
         const last = lastSeen.get(chatId) ?? 0;
@@ -198,7 +224,225 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
         lastSeen.set(chatId, now);
       }
 
-      // Commands
+      // Session must exist early (commands need it)
+      const sessionId = `tg-${chatId}`;
+      const session = await getOrCreateSession(sessionId);
+      const s: any = session as any;
+      s.meta = s.meta ?? {};
+
+      const devDefault = Boolean(s.meta.devDefault);
+      const isDevExplicit = /^\/dev(\s|$)/i.test(text);
+
+      // builderMode musi być policzony zanim użyjesz go w /apply, /rollback itd.
+      const builderMode = isDevExplicit || devDefault;
+      const purpose: "dev" | "runtime" = builderMode ? "dev" : "runtime";
+
+      const canBuild = purpose === "dev" && admins.has(chatId);
+      const autopilotActive = Boolean(s.meta.autopilot) && canBuild;
+      // ---------------------------
+      // Session toggles
+      // ---------------------------
+
+      // /autopilot on|off|status
+      if (text === "/autopilot on") {
+        if (!admins.has(chatId)) {
+          await sendLongMessage(
+            bot,
+            chatId,
+            "❌ autopilot restricted to admins.",
+          );
+          return;
+        }
+        s.meta.autopilot = true;
+        await saveSession(session);
+        await sendLongMessage(bot, chatId, "🤖 autopilot: ON ✅");
+        return;
+      }
+
+      if (text === "/autopilot on") {
+        s.meta.autopilot = true;
+        await saveSession(session);
+        await sendLongMessage(bot, chatId, "🤖 autopilot: ON ✅");
+        return;
+      }
+
+      if (text === "/autopilot off") {
+        s.meta.autopilot = false;
+        await saveSession(session);
+        await sendLongMessage(bot, chatId, "🤖 autopilot: OFF ❌");
+        return;
+      }
+
+      // /devon + /devoff (so you don't have to type /dev every time)
+      if (text === "/devon") {
+        s.meta.devDefault = true;
+        await saveSession(session);
+        await sendLongMessage(
+          bot,
+          chatId,
+          "🛠 dev default: ON ✅ (you can omit /dev)",
+        );
+        return;
+      }
+
+      if (text === "/devoff") {
+        s.meta.devDefault = false;
+        await saveSession(session);
+        await sendLongMessage(bot, chatId, "🛠 dev default: OFF ❌");
+        return;
+      }
+
+      // ---------------------------
+      // Deterministic builder commands (no LLM)
+      // ---------------------------
+
+      if (text === "/lastop") {
+        const latest = await findLatestOpId();
+        await sendLongMessage(
+          bot,
+          chatId,
+          latest ? `🧾 latest opId:\n${latest}` : "No staged operations found.",
+        );
+        return;
+      }
+
+      if (text.startsWith("/status ")) {
+        const opId = text.split(" ")[1]?.trim();
+        if (!opId) {
+          await sendLongMessage(bot, chatId, "Usage: /status <opId>");
+          return;
+        }
+        const op = await loadOp(opId);
+        await sendLongMessage(
+          bot,
+          chatId,
+          [
+            `🧾 opId: ${op.id}`,
+            `status: ${op.status}`,
+            `createdAt: ${op.createdAt}`,
+            `files:`,
+            ...op.files.map((f) => `- ${f.targetPath}`),
+          ].join("\n"),
+        );
+        return;
+      }
+
+      if (text.startsWith("/diff ")) {
+        const opId = text.split(" ")[1]?.trim();
+        if (!opId) {
+          await sendLongMessage(bot, chatId, "Usage: /diff <opId>");
+          return;
+        }
+
+        const res = await diffOperation(opId);
+
+        for (const d of res.diffs) {
+          const header = `🧩 diff: ${d.file}\n`;
+          const body = "```diff\n" + d.diff + "\n```";
+          await sendLongMessage(bot, chatId, header + body, {
+            parse_mode: "Markdown",
+          });
+        }
+        return;
+      }
+
+      if (text.startsWith("/apply ")) {
+        const opId = text.split(" ")[1]?.trim();
+        if (!opId) {
+          await sendLongMessage(bot, chatId, "Usage: /apply <opId>");
+          return;
+        }
+        if (!admins.has(chatId)) {
+          await sendLongMessage(
+            bot,
+            chatId,
+            "❌ /apply is restricted to admins.",
+          );
+          return;
+        }
+        if (!builderMode) {
+          await sendLongMessage(
+            bot,
+            chatId,
+            "❌ /apply requires dev mode. Use /devon or /dev ...",
+          );
+          return;
+        }
+
+        const out = await applyOperation(opId);
+        await sendLongMessage(
+          bot,
+          chatId,
+          `✅ Applied: ${out.opId}\nFiles:\n- ${out.files.join("\n- ")}`,
+        );
+        return;
+      }
+
+      if (text.startsWith("/rollback ")) {
+        const opId = text.split(" ")[1]?.trim();
+        if (!opId) {
+          await sendLongMessage(bot, chatId, "Usage: /rollback <opId>");
+          return;
+        }
+        if (!admins.has(chatId)) {
+          await sendLongMessage(
+            bot,
+            chatId,
+            "❌ /rollback is restricted to admins.",
+          );
+          return;
+        }
+        if (!builderMode) {
+          await sendLongMessage(
+            bot,
+            chatId,
+            "❌ /rollback requires dev mode. Use /devon.",
+          );
+          return;
+        }
+
+        const out = await rollbackOperation(opId);
+        await sendLongMessage(
+          bot,
+          chatId,
+          `✅ Rolled back: ${out.opId} (${out.status})`,
+        );
+        return;
+      }
+
+      if (text.startsWith("/discard ")) {
+        const opId = text.split(" ")[1]?.trim();
+        if (!opId) {
+          await sendLongMessage(bot, chatId, "Usage: /discard <opId>");
+          return;
+        }
+        if (!admins.has(chatId)) {
+          await sendLongMessage(
+            bot,
+            chatId,
+            "❌ /discard is restricted to admins.",
+          );
+          return;
+        }
+
+        const op = await loadOp(opId);
+        op.status = "discarded";
+        await saveOp(op);
+        await appendLog({
+          t: new Date().toISOString(),
+          type: "discard",
+          opId,
+          by: chatId,
+        });
+
+        await sendLongMessage(bot, chatId, `🗑 Discarded: ${opId}`);
+        return;
+      }
+
+      // ---------------------------
+      // Basic commands
+      // ---------------------------
+
       if (text === "/start" || text === "/help") {
         await sendLongMessage(
           bot,
@@ -210,11 +454,21 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
             "/help - show help",
             "/id - show chatId/sessionId",
             "/reset - clear your session",
-            "/dev <text> - route to DEV model (Claude) + builder mode",
+            "/dev <text> - route to DEV model + builder mode",
+            "/devon - set dev as default (no need to type /dev)",
+            "/devoff - disable dev default",
+            "/autopilot on|off|status - enable autopilot workflow in dev",
             "",
-            "Normal messages use default model (Grok).",
+            "Builder commands (deterministic):",
+            "/lastop",
+            "/status <opId>",
+            "/diff <opId>",
+            "/apply <opId>   (admin + /devon)",
+            "/rollback <opId> (admin + /devon)",
+            "/discard <opId> (admin)",
+            "",
+            "Normal messages use runtime provider.",
             "Tool requests may ask for approval with buttons.",
-            "write_file is only possible in /dev and only for admins.",
           ].join("\n"),
         );
         return;
@@ -224,13 +478,12 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
         await sendLongMessage(
           bot,
           chatId,
-          `chatId: ${chatId}\nsessionId: tg-${chatId}`,
+          `chatId: ${chatId}\nsessionId: ${sessionId}`,
         );
         return;
       }
 
       if (text === "/reset") {
-        const sessionId = `tg-${chatId}`;
         try {
           await deleteSession(sessionId);
           await sendLongMessage(bot, chatId, `🧹 Session reset: ${sessionId}`);
@@ -244,40 +497,66 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
         return;
       }
 
-      // -------- Route (/dev => builder mode) --------
-      const isDev = /^\/dev(\s|$)/i.test(text);
-      const builderMode = isDev;
+      // ---------------------------
+      // Route (/dev => builder mode), supports /devon default
+      // ---------------------------
 
-      const rawUserInput = isDev ? text.replace(/^\/dev\s*/i, "") : text;
-      if (isDev && !rawUserInput.trim()) {
+      const rawUserInput = isDevExplicit
+        ? text.replace(/^\/dev\s*/i, "")
+        : text;
+      if (isDevExplicit && !rawUserInput.trim()) {
         await sendLongMessage(bot, chatId, "Usage: /dev <your request>");
         return;
       }
 
-      const purpose = isDev ? "dev" : "default";
+      // Autopilot gating: only in dev + admin
+      const autopilotEnabled = Boolean(s.meta.autopilot);
+      const autopilotPreamble = autopilotActive
+        ? [
+            "[AUTOPILOT MODE]",
+            "You MUST implement changes via Builder workflow only:",
+            "1) stage_file (create or reuse opId)",
+            "2) diff_op (show diff summary)",
+            "3) apply_patch",
+            "4) run_cmd with exact command: npm run build",
+            "If build fails: rollback.",
+            "Never edit repo directly outside builder tools.",
+            "",
+          ].join("\n")
+        : "";
 
-      // Put trace into user input (so it can be forwarded without changing types)
-      const userInput = `[trace:${traceId}] ${rawUserInput}`;
-
-      const sessionId = `tg-${chatId}`;
-      const session = await getOrCreateSession(sessionId);
+      const userInput = `[trace:${traceId}]\n${autopilotPreamble}${rawUserInput}`;
 
       await sendLongMessage(
         bot,
         chatId,
-        `🧠 Working… (session ${sessionId}, ${purpose}, trace ${traceId})`,
+        `🧠 Working… (session ${sessionId}, ${purpose}${autopilotActive ? ", autopilot" : ""}, trace ${traceId})`,
       );
 
-      // Approval function (CLI-like policy)
+      // Approval function
       const approve = async (call: any): Promise<boolean> => {
         const toolName = (call?.name ?? call?.tool ?? "").toString();
+
+        // Autopilot fast-path: no buttons for builder tools (dev + admin only)
+        if (autopilotActive) {
+          if (
+            toolName === "stage_file" ||
+            toolName === "diff_op" ||
+            toolName === "apply_patch" ||
+            toolName === "rollback" ||
+            toolName === "run_cmd" ||
+            toolName === "read_file" ||
+            toolName === "list_dir"
+          ) {
+            return true;
+          }
+        }
 
         // Always allow safe read tools
         if (toolName === "read_file" || toolName === "list_dir") return true;
 
-        // write_file: only in /dev AND only for admins
+        // write_file: only admins; runtime restricts paths (adapter UX-level gating)
         if (toolName === "write_file") {
-          // optional: keep admin restriction
           if (!admins.has(chatId)) {
             await sendLongMessage(
               bot,
@@ -287,14 +566,12 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
             return false;
           }
 
-          // Runtime-safe: allow only data/outputs/*
           try {
             const a = JSON.parse(call?.argumentsJson ?? "{}");
             const p = String(a?.path ?? "");
-            const isSafe = p.startsWith("data/outputs/");
-            const isDevMode = builderMode; // /dev
+            const isSafe = p.startsWith("data/outputs/"); // keep strict here
 
-            if (!isDevMode && !isSafe) {
+            if (!builderMode && !isSafe) {
               await sendLongMessage(
                 bot,
                 chatId,
@@ -311,10 +588,10 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
             return false;
           }
 
-          return true; // auto-approve write_file for admins (or make it buttons if you want)
+          return true;
         }
 
-        // Everything else: interactive approval UX
+        // Everything else: interactive approval
         const key = `${chatId}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
 
         const sent = await sendLongMessage(
@@ -334,7 +611,7 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
           },
         );
 
-        const messageId = sent?.message_id;
+        const messageId = (sent as any)?.message_id;
         if (typeof messageId !== "number") {
           await sendLongMessage(
             bot,
@@ -355,11 +632,19 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
         });
       };
 
-      // Pass traceId through options (duck-typed) so providers can dump per-trace
+      console.log("MODE", {
+        traceId,
+        builderMode,
+        devDefault,
+        isDevExplicit,
+        purpose,
+        autopilotActive,
+      });
+      // HARD normalize (żeby nic innego nie przeszło)
       const res = await runAgentToolLoop(session, {
         purpose,
         input: userInput,
-        maxSteps: 3,
+        maxSteps: autopilotActive ? 10 : 3,
         approve,
         traceId,
       } as any);
@@ -409,11 +694,7 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
   bot.on("callback_query", async (q) => {
     try {
       if (!q.data || !q.message) return;
-      console.log("TG callback_query", {
-        data: q.data,
-        from: q.from?.id,
-        chatId: q.message.chat.id,
-      });
+
       const chatId = q.message.chat.id;
 
       if (allowed && !allowed.has(chatId)) {
@@ -437,7 +718,6 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
       }
 
       const p = pending.get(key);
-
       if (!p) {
         await bot.answerCallbackQuery(q.id, { text: "Expired." });
         return;
@@ -455,18 +735,15 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
 
       await bot.answerCallbackQuery(q.id, { text: ok ? "Approved" : "Denied" });
 
-      // Update the approval message (nice UX)
       await bot.editMessageText(
-        `🔧 TOOL REQUEST (${ok ? "APPROVED ✅" : "DENIED ❌"})\n\`\`\`\n${shortJson(
-          p.call,
-        )}\n\`\`\``,
+        `🔧 TOOL REQUEST (${ok ? "APPROVED ✅" : "DENIED ❌"})\n\`\`\`\n${shortJson(p.call)}\n\`\`\``,
         { chat_id: p.chatId, message_id: p.messageId, parse_mode: "Markdown" },
       );
 
       p.resolve(ok);
-    } catch (e: any) {
+    } catch {
       try {
-        await bot.answerCallbackQuery(q.id, { text: "Error." });
+        await bot.answerCallbackQuery((q as any).id, { text: "Error." });
       } catch {}
     }
   });

@@ -13,7 +13,8 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier . --write",
-    "check": "npm run lint && prettier . --check"
+    "check": "npm run lint && prettier . --check",
+    "restart": "npm run build && sudo systemctl daemon-reload && sudo systemctl restart openclaw-agent.service && sudo journalctl -u openclaw-agent.service -n 30 --no-pager"
   },
   "keywords": [],
   "author": "",

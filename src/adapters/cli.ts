@@ -303,7 +303,7 @@ export async function main(argv: string[]) {
     ? "heartbeat"
     : args.dev
       ? "dev"
-      : "default";
+      : "runtime";
   const session = await getOrCreateSession(args.session);
   const userInput = args.heartbeat ? "ping" : args.input;
 

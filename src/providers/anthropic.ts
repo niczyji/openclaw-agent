@@ -11,6 +11,11 @@ import type {
 } from "../core/types";
 import { makeUsage } from "../core/types";
 
+function ensureNonWhitespaceText(input: unknown, fallback: string): string {
+  const s = String(input ?? "");
+  return s.trim().length > 0 ? s : fallback;
+}
+
 // Helper types (keep strict, avoid any)
 type AnthropicMsgParam = {
   role: "user" | "assistant";
@@ -32,12 +37,15 @@ function toAnthropic(messages: readonly LlmMessage[]): {
 
   for (const m of messages) {
     if (m.role === "system") {
-      systemParts.push(m.content);
+      systemParts.push(ensureNonWhitespaceText(m.content, "(system)"));
       continue;
     }
 
     if (m.role === "user") {
-      msgs.push({ role: "user", content: m.content });
+      msgs.push({
+        role: "user",
+        content: ensureNonWhitespaceText(m.content, "…"),
+      });
       continue;
     }
 
@@ -45,7 +53,10 @@ function toAnthropic(messages: readonly LlmMessage[]): {
       // If assistant contains tool calls, we MUST send tool_use blocks back to Anthropic
       const tc = m.toolCalls ?? [];
       if (tc.length === 0) {
-        msgs.push({ role: "assistant", content: m.content });
+        msgs.push({
+          role: "assistant",
+          content: ensureNonWhitespaceText(m.content, "(assistant)"),
+        });
         continue;
       }
 
@@ -75,7 +86,7 @@ function toAnthropic(messages: readonly LlmMessage[]): {
         {
           type: "tool_result",
           tool_use_id: m.toolCallId,
-          content: m.content,
+          content: ensureNonWhitespaceText(m.content, "(tool result)"),
         },
       ],
     });

@@ -72,10 +72,71 @@ export const CALCULATOR_TOOL: ToolDefinition = {
   }),
 };
 
+export const STAGE_FILE_TOOL: ToolDefinition = {
+  name: "stage_file",
+  description:
+    "Stage a file change into data/patches/staged without modifying the repo. Used by Builder Core to prepare safe patches.",
+  parameters: sObject({
+    properties: {
+      opId: sString(), // optional: continue an existing staged op
+      targetPath: sString(), // repo-relative path (e.g. src/core/router.ts)
+      content: sString(), // full file content
+      note: sString(), // optional note
+    },
+    required: ["targetPath", "content"],
+    additionalProperties: false,
+  }),
+};
+
+export const DIFF_OP_TOOL: ToolDefinition = {
+  name: "diff_op",
+  description:
+    "Show diff for a staged Builder operation (compares staged content vs current repo files).",
+  parameters: sObject({
+    properties: {
+      opId: sString(),
+    },
+    required: ["opId"],
+    additionalProperties: false,
+  }),
+};
+
+export const APPLY_PATCH_TOOL: ToolDefinition = {
+  name: "apply_patch",
+  description:
+    "Apply a staged Builder operation to the repo with backups (dev mode only).",
+  parameters: sObject({
+    properties: {
+      opId: sString(),
+    },
+    required: ["opId"],
+    additionalProperties: false,
+  }),
+};
+
+export const ROLLBACK_TOOL: ToolDefinition = {
+  name: "rollback",
+  description:
+    "Rollback an applied Builder operation using backups (dev mode only).",
+  parameters: sObject({
+    properties: {
+      opId: sString(),
+    },
+    required: ["opId"],
+    additionalProperties: false,
+  }),
+};
+
 export const ALL_TOOLS: readonly ToolDefinition[] = [
   READ_FILE_TOOL,
   LIST_DIR_TOOL,
   WRITE_FILE_TOOL,
   CALCULATOR_TOOL,
   RUN_CMD_TOOL,
+
+  // Builder Core tools
+  STAGE_FILE_TOOL,
+  DIFF_OP_TOOL,
+  APPLY_PATCH_TOOL,
+  ROLLBACK_TOOL,
 ] as const;
