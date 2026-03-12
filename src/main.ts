@@ -1,9 +1,14 @@
 // src/main.ts
+import "dotenv/config";
 import { main as cliMain } from "./adapters/cli.js";
 import { startTelegramAdapter } from "./adapters/telegram.js";
 
 async function boot() {
-  const token = (process.env.TELEGRAM_TOKEN ?? "").trim();
+  const token = (
+    process.env.TELEGRAM_TOKEN ??
+    process.env.TELEGRAM_BOT_TOKEN ??
+    ""
+  ).trim();
 
   if (token) {
     await startTelegramAdapter({ token });
