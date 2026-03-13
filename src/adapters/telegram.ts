@@ -16,6 +16,9 @@ import { applyOperation } from "../core/builder/apply.js";
 import { rollbackOperation } from "../core/builder/rollback.js";
 import { loadOp, saveOp, appendLog } from "../core/builder/store.js";
 
+// VerkaufPilot (deterministic commands)
+import { handleVpCommand } from "../features/verkaufpilot/telegram/vpCommands.js";
+
 type StartTelegramAdapterOpts = {
   token: string;
 };
@@ -209,7 +212,8 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
         !text.startsWith("/reset") &&
         !text.startsWith("/autopilot") &&
         !text.startsWith("/devon") &&
-        !text.startsWith("/devoff")
+        !text.startsWith("/devoff") &&
+        !text.startsWith("/vp")
       ) {
         const now = Date.now();
         const last = lastSeen.get(chatId) ?? 0;
@@ -440,6 +444,19 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
       }
 
       // ---------------------------
+      // VerkaufPilot commands (deterministic, no LLM)
+      // ---------------------------
+
+      if (text.startsWith("/vp")) {
+        await handleVpCommand(
+          (msg) => sendLongMessage(bot, chatId, msg),
+          text,
+          admins.has(chatId),
+        );
+        return;
+      }
+
+      // ---------------------------
       // Basic commands
       // ---------------------------
 
@@ -469,6 +486,20 @@ export async function startTelegramAdapter(opts: StartTelegramAdapterOpts) {
             "",
             "Normal messages use runtime provider.",
             "Tool requests may ask for approval with buttons.",
+            "",
+            "VerkaufPilot:",
+            "/vp - VP help",
+            "/vp summary - intent stats",
+            "/vp list [intent] - messages",
+            "/vp items - tracked listings",
+            "/vp pending - open messages (new/suggested)",
+            "/vp suggest <id> - generate reply suggestion",
+            "/vp mark-replied <id> - mark as replied",
+            "/vp close <id> - close conversation",
+            "/vp import - Gmail import + auto-suggest (admin)",
+            "/vp import-paypal - PayPal payment matching (admin)",
+            "/vp prepare-shipping <id> - extract address + Hermes prep",
+            "/vp shipped <id> <tracking> - store tracking, mark shipped",
           ].join("\n"),
         );
         return;

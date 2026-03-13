@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createGmailClient } from "./createGmailClient.js";
 import { parseKleinanzeigenMail } from "../parseKleinanzeigenMail.js";
+import { upsertMessage } from "../db/messageRepo.js";
 
 function decodeBase64Url(input: string): string {
   const normalized = input.replace(/-/g, "+").replace(/_/g, "/");
@@ -44,7 +45,15 @@ async function fileExists(filePath: string): Promise<boolean> {
   }
 }
 
-export async function importKleinanzeigenFromGmail(): Promise<void> {
+export type ImportSummary = {
+  imported: number;
+  skipped: number;
+  total: number;
+  /** DB IDs of messages that were freshly inserted (not skipped duplicates). */
+  newMessageIds: number[];
+};
+
+export async function importKleinanzeigenFromGmail(): Promise<ImportSummary> {
   const gmail = await createGmailClient();
 
   const listRes = await gmail.users.messages.list({
@@ -56,7 +65,7 @@ export async function importKleinanzeigenFromGmail(): Promise<void> {
   const messages = listRes.data.messages ?? [];
   if (messages.length === 0) {
     console.log("No Kleinanzeigen messages found.");
-    return;
+    return { imported: 0, skipped: 0, total: 0 };
   }
 
   const outDir = path.resolve(
@@ -67,6 +76,7 @@ export async function importKleinanzeigenFromGmail(): Promise<void> {
 
   let importedCount = 0;
   let skippedCount = 0;
+  const newMessageIds: number[] = [];
 
   for (const msg of messages) {
     if (!msg.id) continue;
@@ -110,22 +120,42 @@ export async function importKleinanzeigenFromGmail(): Promise<void> {
       };
     }
 
+    const importedAt = new Date().toISOString();
+
     const output = {
       gmailMessageId: msg.id,
-      importedAt: new Date().toISOString(),
+      importedAt,
       subject,
       from,
       receivedAt: date,
       parsed,
     };
 
-    await fs.writeFile(outPath, JSON.stringify(output, null, 2), "utf8");
+    const outputJson = JSON.stringify(output, null, 2);
+    await fs.writeFile(outPath, outputJson, "utf8");
+
+    // Persist to SQLite (only for successfully parsed messages).
+    if (parsed.type === "buyer_message") {
+      const { inserted, messageId } = upsertMessage({
+        gmailMessageId: msg.id,
+        parsed,
+        importedAt,
+        rawJson: outputJson,
+      });
+      if (inserted && messageId != null) {
+        newMessageIds.push(messageId);
+      } else {
+        console.log(`DB: already exists, skipped upsert for ${msg.id}`);
+      }
+    }
 
     importedCount += 1;
-    console.log(`Imported: ${outPath}`);
+    console.log(`Imported: ${outPath} (intent: ${parsed.intent ?? "n/a"}`);
   }
 
   console.log(
     `Import summary: imported=${importedCount}, skipped=${skippedCount}, totalSeen=${messages.length}`,
   );
+
+  return { imported: importedCount, skipped: skippedCount, total: messages.length, newMessageIds };
 }

@@ -16,16 +16,23 @@ function ensureNonWhitespaceText(input: unknown, fallback: string): string {
   return s.trim().length > 0 ? s : fallback;
 }
 
-// Helper types (keep strict, avoid any)
 type AnthropicMsgParam = {
   role: "user" | "assistant";
   content: string | readonly unknown[];
 };
 
+const DEFAULT_MAX_OUTPUT_TOKENS = 4000;
+const HARD_MAX_OUTPUT_TOKENS = 20000;
+const DEFAULT_TEMPERATURE = 0.2;
+
 function safeParseJsonObject(json: string): Record<string, unknown> {
-  const v = JSON.parse(json) as unknown;
-  if (typeof v !== "object" || v === null || Array.isArray(v)) return {};
-  return v as Record<string, unknown>;
+  try {
+    const v = JSON.parse(json) as unknown;
+    if (typeof v !== "object" || v === null || Array.isArray(v)) return {};
+    return v as Record<string, unknown>;
+  } catch {
+    return {};
+  }
 }
 
 function toAnthropic(messages: readonly LlmMessage[]): {
@@ -50,8 +57,8 @@ function toAnthropic(messages: readonly LlmMessage[]): {
     }
 
     if (m.role === "assistant") {
-      // If assistant contains tool calls, we MUST send tool_use blocks back to Anthropic
       const tc = m.toolCalls ?? [];
+
       if (tc.length === 0) {
         msgs.push({
           role: "assistant",
@@ -62,8 +69,11 @@ function toAnthropic(messages: readonly LlmMessage[]): {
 
       const blocks: unknown[] = [];
 
-      if (m.content && m.content.trim().length) {
-        blocks.push({ type: "text", text: m.content });
+      if (typeof m.content === "string" && m.content.trim().length > 0) {
+        blocks.push({
+          type: "text",
+          text: m.content,
+        });
       }
 
       for (const call of tc) {
@@ -75,11 +85,14 @@ function toAnthropic(messages: readonly LlmMessage[]): {
         });
       }
 
-      msgs.push({ role: "assistant", content: blocks });
+      msgs.push({
+        role: "assistant",
+        content: blocks,
+      });
       continue;
     }
 
-    // m.role === "tool"
+    // role === "tool"
     msgs.push({
       role: "user",
       content: [
@@ -92,10 +105,13 @@ function toAnthropic(messages: readonly LlmMessage[]): {
     });
   }
 
-  const system = systemParts.length ? systemParts.join("\n\n") : undefined;
+  const system = systemParts.length > 0 ? systemParts.join("\n\n") : undefined;
 
   if (!msgs.some((x) => x.role === "user")) {
-    msgs.unshift({ role: "user", content: "Hello" });
+    msgs.unshift({
+      role: "user",
+      content: "Hello",
+    });
   }
 
   return { system, msgs };
@@ -113,15 +129,20 @@ function toAnthropicTools(
 
 function extractText(res: Anthropic.Messages.Message): string {
   const parts: string[] = [];
+
   for (const block of res.content) {
-    if (block.type === "text") parts.push(block.text);
+    if (block.type === "text") {
+      parts.push(block.text);
+    }
   }
+
   const joined = parts.join("");
-  return joined.length ? joined : "(no response)";
+  return joined.length > 0 ? joined : "(no response)";
 }
 
 function extractToolCalls(res: Anthropic.Messages.Message): ToolCall[] {
   const calls: ToolCall[] = [];
+
   for (const block of res.content) {
     if (block.type === "tool_use") {
       calls.push({
@@ -131,7 +152,17 @@ function extractToolCalls(res: Anthropic.Messages.Message): ToolCall[] {
       });
     }
   }
+
   return calls;
+}
+
+function clampMaxOutputTokens(value: unknown): number {
+  const numeric =
+    typeof value === "number" && Number.isFinite(value)
+      ? Math.trunc(value)
+      : DEFAULT_MAX_OUTPUT_TOKENS;
+
+  return Math.min(HARD_MAX_OUTPUT_TOKENS, Math.max(1, numeric));
 }
 
 export async function anthropicChat(req: LlmRequest): Promise<LlmResponse> {
@@ -141,19 +172,32 @@ export async function anthropicChat(req: LlmRequest): Promise<LlmResponse> {
     );
   }
 
-  const client = new Anthropic({ apiKey: config.anthropic.apiKey });
+  const client = new Anthropic({
+    apiKey: config.anthropic.apiKey,
+  });
 
   const { system, msgs } = toAnthropic(req.messages);
+  const model = req.model ?? config.anthropic.model;
+  const maxTokens = clampMaxOutputTokens(req.maxOutputTokens);
+  const temperature =
+    typeof req.temperature === "number" ? req.temperature : DEFAULT_TEMPERATURE;
 
-  const maxTokens = Math.max(1, Math.trunc(req.maxOutputTokens));
+  console.log("[anthropicChat] provider=anthropic");
+  console.log("[anthropicChat] model=", model);
+  console.log(
+    "[anthropicChat] requested maxOutputTokens=",
+    req.maxOutputTokens,
+  );
+  console.log("[anthropicChat] final max_tokens=", maxTokens);
+  console.log("[anthropicChat] tools count=", req.tools?.length ?? 0);
 
   const res = await client.messages.create({
-    model: req.model ?? config.anthropic.model,
+    model,
     max_tokens: maxTokens,
-    temperature: req.temperature ?? 0.2,
+    temperature,
     ...(system ? { system } : {}),
     messages: msgs as unknown as Anthropic.Messages.MessageParam[],
-    ...(req.tools && req.tools.length
+    ...(req.tools && req.tools.length > 0
       ? { tools: toAnthropicTools(req.tools) }
       : {}),
   });
@@ -161,9 +205,17 @@ export async function anthropicChat(req: LlmRequest): Promise<LlmResponse> {
   const text = extractText(res);
   const toolCalls = extractToolCalls(res);
 
-  const message: AssistantMessage = toolCalls.length
-    ? { role: "assistant", content: text, toolCalls }
-    : { role: "assistant", content: text };
+  const message: AssistantMessage =
+    toolCalls.length > 0
+      ? {
+          role: "assistant",
+          content: text,
+          toolCalls,
+        }
+      : {
+          role: "assistant",
+          content: text,
+        };
 
   const finishReason =
     res.stop_reason === "end_turn"

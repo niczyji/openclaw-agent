@@ -5,6 +5,7 @@ export type KleinanzeigenIntent =
   | "meeting_request"
   | "general_interest"
   | "positive_feedback"
+  | "payment_issue"
   | "unknown";
 
 export type KleinanzeigenMessage = {
